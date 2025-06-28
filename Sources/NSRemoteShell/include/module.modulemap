@@ -1,0 +1,8 @@
+module NSRemoteShell {
+    header "../NSRemoteShell.h"
+    header "../NSRemoteFile.h"
+    header "../NSRemoteForward.h"
+    header "../NSLocalForward.h"
+    header "../NSRemoteChannel.h"
+    export *
+}
