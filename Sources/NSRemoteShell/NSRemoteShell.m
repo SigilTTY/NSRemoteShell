@@ -50,6 +50,9 @@
 @property (nonatomic, readwrite, assign) unsigned keepAliveAttampt;
 @property (nonatomic, readwrite, nullable, strong) NSDate *keepAliveLastSuccessAttampt;
 
+@property (nonatomic, readwrite, strong) NSNumber *keepAliveInterval;
+@property (nonatomic, readwrite) BOOL keepAliveWantReply;
+
 @end
 
 @implementation NSRemoteShell
@@ -75,6 +78,8 @@
         _operableObjects = [[NSMutableArray alloc] init];
         _requestInvokations = [[NSMutableArray alloc] init];
         _requestLoopLock = [[NSLock alloc] init];
+        _keepAliveInterval = @(0);  // Default: disabled
+        _keepAliveWantReply = NO;
     }
     
     return self;
@@ -139,6 +144,20 @@
     }
     @synchronized(self) {
         [self setOperationTimeout:timeout];
+    }
+    return self;
+}
+
+- (instancetype)setupKeepAliveInterval:(NSNumber *)interval {
+    @synchronized(self) {
+        [self setKeepAliveInterval:interval];
+    }
+    return self;
+}
+
+- (instancetype)setupKeepAliveWantReply:(BOOL)wantReply {
+    @synchronized(self) {
+        [self setKeepAliveWantReply:wantReply];
     }
     return self;
 }
@@ -641,9 +660,11 @@ continue; \
     
     // because we are running non-blocking-mode
     // we are responsible for sending the keep alive packet
-    // we set the interval value as smallest
-    // so wont case other problem (not 1 but 2)
-    libssh2_keepalive_config(constructorSession, 0, 2);
+    // Configure keepalive based on user settings
+    int intervalValue = [self.keepAliveInterval intValue];
+    int wantReplyValue = self.keepAliveWantReply ? 1 : 0;
+    libssh2_keepalive_config(constructorSession, wantReplyValue, intervalValue);
+    NSLog(@"[KeepAlive] Configured with interval: %d seconds, want_reply: %d", intervalValue, wantReplyValue);
     
     self.connected = YES;
     NSLog(@"constructed libssh2 session to %@ with %@", self.remoteHost, self.resolvedRemoteIpAddress);
@@ -713,8 +734,14 @@ continue; \
     }
     
     // the session is valid, check if last success attempt is shorter than interval
+    // Use configured interval, or skip if disabled (0)
+    int configuredInterval = [self.keepAliveInterval intValue];
+    if (configuredInterval <= 0) {
+        return; // Keep-alive is disabled
+    }
+    
     if (self.keepAliveLastSuccessAttampt) {
-        NSDate *nextRun = [self.keepAliveLastSuccessAttampt dateByAddingTimeInterval:KEEPALIVE_INTERVAL];
+        NSDate *nextRun = [self.keepAliveLastSuccessAttampt dateByAddingTimeInterval:configuredInterval];
         if ([nextRun timeIntervalSinceNow] >= 0) {
             return;
         }
@@ -729,6 +756,9 @@ continue; \
     if (retVal == 0) {
         self.keepAliveLastSuccessAttampt = [[NSDate alloc] init];
         self.keepAliveAttampt = 0;
+#if DEBUG
+        NSLog(@"[KeepAlive] Successfully sent keep-alive packet (interval: %ds, next: %ds)", configuredInterval, nextInterval);
+#endif
     } else {
         // treat anything else as error and close if retry too much times
         if (self.keepAliveAttampt > KEEPALIVE_ERROR_TOLERANCE_MAX_RETRY) {

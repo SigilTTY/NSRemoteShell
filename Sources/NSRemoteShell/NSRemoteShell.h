@@ -26,12 +26,17 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly, nullable, strong) NSString *remoteBanner;
 @property (nonatomic, readonly, nullable, strong) NSString *remoteFingerPrint;
 
+@property (nonatomic, readonly, strong) NSNumber *keepAliveInterval;
+@property (nonatomic, readonly) BOOL keepAliveWantReply;
+
 #pragma mark initializer
 
 - (instancetype)init;
 - (instancetype)setupConnectionHost:(NSString *)targetHost;
 - (instancetype)setupConnectionPort:(NSNumber *)targetPort;
 - (instancetype)setupConnectionTimeout:(NSNumber *)timeout;
+- (instancetype)setupKeepAliveInterval:(NSNumber *)interval;
+- (instancetype)setupKeepAliveWantReply:(BOOL)wantReply;
 
 #pragma mark event loop
 
