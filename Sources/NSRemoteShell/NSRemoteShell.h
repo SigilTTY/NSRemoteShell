@@ -28,6 +28,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 @property (nonatomic, readonly, strong) NSNumber *keepAliveInterval;
 @property (nonatomic, readonly) BOOL keepAliveWantReply;
+@property (nonatomic, readonly) NSInteger lastUsedLocalPort;
 
 #pragma mark initializer
 

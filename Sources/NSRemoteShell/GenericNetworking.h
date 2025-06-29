@@ -18,6 +18,7 @@ NS_ASSUME_NONNULL_BEGIN
 + (BOOL)isValidateWithPort:(NSNumber*)port;
 
 + (int)createSocketNonblockingListenerWithLocalPort:(NSNumber*)localPort;
++ (int)createSocketNonblockingListenerWithLocalPort:(NSNumber*)localPort actualPort:(int*)actualPort;
 
 + (int)createSocketWithTargetHost:(NSString*)targetHost
                    withTargetPort:(NSNumber*)targetPort

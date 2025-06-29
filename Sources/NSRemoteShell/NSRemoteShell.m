@@ -75,6 +75,7 @@
         _associatedSocket = 0;
         _associatedSession = NULL;
         _associatedFileTransfer = NULL;
+        _lastUsedLocalPort = 0;
         _operableObjects = [[NSMutableArray alloc] init];
         _requestInvokations = [[NSMutableArray alloc] init];
         _requestLoopLock = [[NSLock alloc] init];
@@ -1103,7 +1104,8 @@ continue; \
         return;
     }
     
-    int sock4 = [GenericNetworking createSocketNonblockingListenerWithLocalPort:localPort];
+    int actualPortUsed = 0;
+    int sock4 = [GenericNetworking createSocketNonblockingListenerWithLocalPort:localPort actualPort:&actualPortUsed];
     if (sock4 <= 0) {
         DISPATCH_SEMAPHORE_CHECK_SIGNLE(completionSemaphore);
         return;
@@ -1111,12 +1113,15 @@ continue; \
     
     NSLog(@"processing channel startup for direct tcpip");
     
+    // Store the actual port that was used
+    _lastUsedLocalPort = actualPortUsed;
+    
     LIBSSH2_SESSION *session = self.associatedSession;
     NSLocalForward *operator = [[NSLocalForward alloc] initWithRepresentedSession:session
                                                             withRepresentedSocket:sock4
                                                                    withTargetHost:targetHost
                                                                    withTargetPort:targetPort
-                                                                    withLocalPort:localPort
+                                                                    withLocalPort:[NSNumber numberWithInt:actualPortUsed]
                                                                       withTimeout:self.operationTimeout
     ];
     

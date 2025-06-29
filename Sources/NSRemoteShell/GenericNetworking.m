@@ -6,6 +6,8 @@
 //
 
 #import "GenericNetworking.h"
+#import <errno.h>
+#import <string.h>
 
 @implementation GenericNetworking
 
@@ -43,6 +45,11 @@
 
 + (int)createSocketNonblockingListenerWithLocalPort:(NSNumber*)localPort
 {
+    return [self createSocketNonblockingListenerWithLocalPort:localPort actualPort:NULL];
+}
+
++ (int)createSocketNonblockingListenerWithLocalPort:(NSNumber*)localPort actualPort:(int*)actualPort
+{
     if (![GenericNetworking isValidateWithPort:localPort]) {
         NSLog(@"invalid port %@", [localPort stringValue]);
         return 0;
@@ -58,17 +65,35 @@
     server4.sin_family = AF_INET;
     server4.sin_addr.s_addr = inet_addr("127.0.0.1"); // for security?
     server4.sin_port = htons(port);
-    if (setsockopt(socket_desc4, SOL_SOCKET, SO_REUSEPORT, &(int){1}, sizeof(int)) == -1) {
+    if (setsockopt(socket_desc4, SOL_SOCKET, SO_REUSEADDR, &(int){1}, sizeof(int)) == -1) {
         NSLog(@"failed to setsockopt for ipv4 at port %d", port);
         close(socket_desc4);
         return 0;
     }
     if (bind(socket_desc4, (struct sockaddr*)&server4, sizeof(server4)) < 0) {
-        NSLog(@"failed to bind socket for ipv4 at port %d", port);
+        NSLog(@"failed to bind socket for ipv4 at port %d, errno: %d, error: %s", port, errno, strerror(errno));
         close(socket_desc4);
         return 0;
     } else {
-        NSLog(@"bound listener v4 for port %d", port);
+        // If port was 0, get the actual assigned port
+        if (port == 0) {
+            struct sockaddr_in actualAddr;
+            socklen_t addrLen = sizeof(actualAddr);
+            if (getsockname(socket_desc4, (struct sockaddr*)&actualAddr, &addrLen) == 0) {
+                int assignedPort = ntohs(actualAddr.sin_port);
+                NSLog(@"bound listener v4 for OS-assigned port %d", assignedPort);
+                if (actualPort) {
+                    *actualPort = assignedPort;
+                }
+            } else {
+                NSLog(@"bound listener v4 for port %d (failed to get actual port)", port);
+            }
+        } else {
+            NSLog(@"bound listener v4 for port %d", port);
+            if (actualPort) {
+                *actualPort = port;
+            }
+        }
     }
     if (fcntl(socket_desc4, F_SETFL, fcntl(socket_desc4, F_GETFL, 0) | O_NONBLOCK) == -1) {
         NSLog(@"failed to call fcntl for none-blocking ipv4 at port %d", port);
@@ -76,7 +101,7 @@
         return 0;
     }
     if (listen(socket_desc4, SOCKET_QUEUE_MAXSIZE) == -1) {
-        NSLog(@"failed to call fcntl for none-blocking ipv6 at port %d", port);
+        NSLog(@"failed to call listen for ipv4 at port %d", port);
         close(socket_desc4);
         return 0;
     }
