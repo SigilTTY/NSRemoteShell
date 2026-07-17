@@ -5,9 +5,12 @@
 //  Created by Lakr Aream on 2022/2/4.
 //
 
-#import <libssh2.h>
-#import <libssh2_sftp.h>
-#import <libssh2_publickey.h>
+// Headers are nested under CSSH/ inside the xcframework so the copied
+// products include/ dir doesn't collide with other binary targets
+// (GhosttyKit also ships a root-level module.modulemap).
+#import <CSSH/libssh2.h>
+#import <CSSH/libssh2_sftp.h>
+#import <CSSH/libssh2_publickey.h>
 
 #import <arpa/inet.h>
 #import <netinet/in.h>
