@@ -25,6 +25,9 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly, nullable, strong) NSString *resolvedRemoteIpAddress;
 @property (nonatomic, readonly, nullable, strong) NSString *remoteBanner;
 @property (nonatomic, readonly, nullable, strong) NSString *remoteFingerPrint;
+// OpenSSH-style "SHA256:" + unpadded base64 host-key fingerprint, matching
+// `ssh-keygen -l` output; used for known-host (TOFU) verification.
+@property (nonatomic, readonly, nullable, strong) NSString *remoteFingerprintSHA256;
 
 @property (nonatomic, readonly, strong) NSNumber *keepAliveInterval;
 @property (nonatomic, readonly) BOOL keepAliveWantReply;

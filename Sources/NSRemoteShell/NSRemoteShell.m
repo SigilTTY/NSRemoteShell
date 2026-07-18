@@ -31,6 +31,7 @@
 @property (nonatomic, readwrite, nullable, strong) NSString *resolvedRemoteIpAddress;
 @property (nonatomic, readwrite, nullable, strong) NSString *remoteBanner;
 @property (nonatomic, readwrite, nullable, strong) NSString *remoteFingerPrint;
+@property (nonatomic, readwrite, nullable, strong) NSString *remoteFingerprintSHA256;
 @property (nonatomic, readwrite, nullable, strong) NSString *lastError;
 @property (nonatomic, readwrite, nullable, strong) NSString *lastFileTransferError;
 
@@ -663,6 +664,19 @@ continue; \
             self.remoteFingerPrint = [fingerprint copy];
         }
     } while (0);
+
+    do {
+        // OpenSSH-style fingerprint ("SHA256:" + unpadded base64), used for
+        // known-host (TOFU) verification.
+        const char *hash = libssh2_hostkey_hash(constructorSession, LIBSSH2_HOSTKEY_HASH_SHA256);
+        if (hash) {
+            NSData *digest = [[NSData alloc] initWithBytes:hash length:32];
+            NSString *base64 = [digest base64EncodedStringWithOptions:0];
+            NSString *trimmed = [base64 stringByTrimmingCharactersInSet:
+                                 [NSCharacterSet characterSetWithCharactersInString:@"="]];
+            self.remoteFingerprintSHA256 = [@"SHA256:" stringByAppendingString:trimmed];
+        }
+    } while (0);
     
     // because we are running non-blocking-mode
     // we are responsible for sending the keep alive packet
@@ -699,6 +713,7 @@ continue; \
     self.resolvedRemoteIpAddress = NULL;
     self.remoteBanner = NULL;
     self.remoteFingerPrint = NULL;
+    self.remoteFingerprintSHA256 = NULL;
     
     self.keepAliveAttampt = 0;
     self.keepAliveLastSuccessAttampt = NULL;
