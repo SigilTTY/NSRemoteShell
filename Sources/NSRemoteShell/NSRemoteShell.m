@@ -635,6 +635,11 @@ continue; \
         break;
     }
     if (!sessionHandshakeComplete) {
+        // Capture the libssh2 error before the session is freed, so the UI
+        // can show the real handshake failure instead of a bare
+        // "Connection rejected".
+        [self unsafeReadLastError];
+        NSLog(@"session handshake failed with %@: %@", self.remoteHost, self.lastError ?: @"(no error detail)");
         [self unsafeDisconnect];
         return;
     }
