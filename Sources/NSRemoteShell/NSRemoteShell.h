@@ -104,6 +104,7 @@ typedef void (^NSRemoteFileDeleteProgressBlock)(NSString *currentFile);
 - (void)requestDisconnectFileTransferAndWait;
 - (nullable NSArray<NSRemoteFile*>*)requestFileListAt:(NSString*)atDirPath;
 - (nullable NSRemoteFile*)requestFileInfoAt:(NSString*)atPath;
+- (nullable NSString*)requestRealpathAt:(NSString*)atPath;
 - (BOOL)requestRenameFileAndWait:(NSString*)atPath
                      withNewPath:(NSString*)newPath;
 - (BOOL)requestUploadForFileAndWait:(NSString*)atPath

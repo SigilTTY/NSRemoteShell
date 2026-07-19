@@ -456,6 +456,23 @@ continue; \
     return result;
 }
 
+- (nullable NSString*)requestRealpathAt:(NSString*)atPath {
+    if (self.destroyed) return NULL;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __weak typeof(self) magic = self;
+    __block NSString *result = NULL;
+    @synchronized (self.requestInvokations) {
+        id block = [^{
+            result = [magic unsafeRealpathAt:atPath];
+            DISPATCH_SEMAPHORE_CHECK_SIGNLE(sem);
+        } copy];
+        [self.requestInvokations addObject:block];
+    }
+    [self.associatedLoop explicitRequestHandle];
+    MakeDispatchSemaphoreWaitWithTimeout(sem);
+    return result;
+}
+
 - (BOOL) requestRenameFileAndWait:(NSString *)atPath
                       withNewPath:(NSString *)newPath
 {
@@ -1469,8 +1486,43 @@ continue; \
     }
     NSRemoteFile *file = [[NSRemoteFile alloc] initWithFilename:atPath.lastPathComponent];
     [file populateAttributes:fileAttributes];
-    
+
     return file;
+}
+
+- (nullable NSString*)unsafeRealpathAt:(NSString*)atPath
+{
+    if (![self unsafeValidateSessionSFTP]) {
+        [self unsafeFileTransferSetErrorForFile:atPath pathIsRemote:YES failureReason:@"connection broken"];
+        return NULL;
+    }
+    LIBSSH2_SESSION *session = self.associatedSession;
+    LIBSSH2_SFTP *sftp = self.associatedFileTransfer;
+
+    char buffer[4096];
+    int rc = 0;
+    NSDate *date = [[NSDate alloc] initWithTimeIntervalSinceNow:[self.operationTimeout intValue]];
+    while (true) {
+        if ([date timeIntervalSinceNow] < 0) {
+            libssh2_session_set_last_error(session, LIBSSH2_ERROR_TIMEOUT, NULL);
+            rc = LIBSSH2_ERROR_TIMEOUT;
+            break;
+        }
+        const char *cpath = [atPath UTF8String];
+        rc = libssh2_sftp_realpath(sftp, cpath, buffer, sizeof(buffer));
+        if (rc == LIBSSH2_ERROR_EAGAIN) {
+            usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT);
+            continue;
+        }
+        break;
+    }
+    [self unsafeReadLastError];
+    // on success rc is the byte count of the resolved path inside buffer
+    if (rc <= 0) {
+        [self unsafeFileTransferSetErrorForFile:atPath pathIsRemote:YES failureReason:@"realpath failed"];
+        return NULL;
+    }
+    return [[NSString alloc] initWithBytes:buffer length:rc encoding:NSUTF8StringEncoding];
 }
 
 - (BOOL)unsafeUploadForFile:(NSString*)atPath
