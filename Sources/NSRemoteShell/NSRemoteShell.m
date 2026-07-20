@@ -10,6 +10,7 @@
 #import "TSEventLoop.h"
 
 #import "NSRemoteChannel.h"
+#import "NSRemoteChannelAgentForward.h"
 #import "NSLocalForward.h"
 #import "NSRemoteForward.h"
 
@@ -48,13 +49,35 @@
 @property (nonatomic, readwrite, nonnull, strong) NSMutableArray *requestInvokations;
 @property (nonatomic, readwrite, nonnull, strong) NSLock *requestLoopLock;
 
+// SSH agent forwarding: the handler answers reverse-channel agent requests;
+// pendingAgentChannels holds channels accepted inside the libssh2 callback
+// (which fires mid-iteration over operableObjects) until the event loop can
+// safely merge them in.
+@property (nonatomic, readwrite, nullable, strong) NSRemoteAgentForwardHandler agentForwardHandler;
+@property (nonatomic, readwrite, nonnull, strong) NSMutableArray<id<NSRemoteOperableObject>> *pendingAgentChannels;
+
 @property (nonatomic, readwrite, assign) unsigned keepAliveAttampt;
 @property (nonatomic, readwrite, nullable, strong) NSDate *keepAliveLastSuccessAttampt;
 
 @property (nonatomic, readwrite, strong) NSNumber *keepAliveInterval;
 @property (nonatomic, readwrite) BOOL keepAliveWantReply;
 
+// Called from the libssh2 AUTHAGENT callback (event-loop thread) to take
+// ownership of a reverse auth-agent channel.
+- (void)unsafeAcceptAgentForwardChannel:(LIBSSH2_CHANNEL *)channel;
+
 @end
+
+// libssh2 AUTHAGENT callback: `*abstract` is the NSRemoteShell set as the
+// session's user data in libssh2_session_init_ex. Fires on the event-loop
+// thread while a shell-channel read is processing an incoming packet.
+static void crossshell_authagent_open(LIBSSH2_SESSION *session,
+                                      LIBSSH2_CHANNEL *channel,
+                                      void **abstract) {
+    if (!abstract || !*abstract || !channel) { return; }
+    NSRemoteShell *shell = (__bridge NSRemoteShell *)(*abstract);
+    [shell unsafeAcceptAgentForwardChannel:channel];
+}
 
 @implementation NSRemoteShell
 
@@ -79,6 +102,7 @@
         _lastUsedLocalPort = 0;
         _operableObjects = [[NSMutableArray alloc] init];
         _requestInvokations = [[NSMutableArray alloc] init];
+        _pendingAgentChannels = [[NSMutableArray alloc] init];
         _requestLoopLock = [[NSLock alloc] init];
         _keepAliveInterval = @(0);  // Default: disabled
         _keepAliveWantReply = NO;
@@ -191,6 +215,13 @@ continue; \
             [object unsafeCallNonblockingOperations];
             NSRemoteOperableObjectCheck(object);
             [newArray addObject:object];
+        }
+        // Merge any reverse auth-agent channels accepted during the loop
+        // (the libssh2 callback appends them here to avoid mutating the
+        // array being iterated); they start servicing on the next tick.
+        @synchronized (self.pendingAgentChannels) {
+            [newArray addObjectsFromArray:self.pendingAgentChannels];
+            [self.pendingAgentChannels removeAllObjects];
         }
         self.operableObjects = newArray;
         [self unsafeDispatchSourceMakeDecision];
@@ -1100,7 +1131,22 @@ continue; \
             return;
         }
     } while (0);
-    
+
+    // Agent forwarding (opt-in): register the reverse-channel callback and
+    // ask the server to allow agent requests on this shell. A failure to
+    // request is non-fatal — the shell still works, forwarding just won't
+    // be offered.
+    if (self.agentForwardHandler) {
+        libssh2_session_callback_set(session, LIBSSH2_CALLBACK_AUTHAGENT,
+                                     (void *)crossshell_authagent_open);
+        while (true) {
+            int rc = libssh2_channel_request_auth_agent(channel);
+            if (rc == LIBSSH2_ERROR_EAGAIN) { usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT); continue; }
+            if (rc != 0) { NSLog(@"agent forwarding request failed: %d", rc); }
+            break;
+        }
+    }
+
     if (completionSemaphore) {
         [channelObject onTermination:^{
             DISPATCH_SEMAPHORE_CHECK_SIGNLE(completionSemaphore);
@@ -1109,6 +1155,31 @@ continue; \
     
     [self.operableObjects addObject:channelObject];
     if (withOnCreate) { withOnCreate(); }
+}
+
+#pragma mark agent forwarding
+
+- (void)installAgentForwardHandler:(nullable NSData * _Nullable (^)(NSData * _Nonnull))handler {
+    @synchronized (self) {
+        self.agentForwardHandler = handler;
+    }
+}
+
+- (void)unsafeAcceptAgentForwardChannel:(LIBSSH2_CHANNEL *)channel {
+    NSRemoteAgentForwardHandler handler = self.agentForwardHandler;
+    if (!handler) {
+        // Forwarding was disabled after the request — refuse by closing.
+        while (libssh2_channel_close(channel) == LIBSSH2_ERROR_EAGAIN) {};
+        while (libssh2_channel_free(channel) == LIBSSH2_ERROR_EAGAIN) {};
+        return;
+    }
+    NSRemoteChannelAgentForward *agentChannel =
+        [[NSRemoteChannelAgentForward alloc] initWithRepresentedSession:self.associatedSession
+                                                 withRepresentedChannel:channel
+                                                            withHandler:handler];
+    @synchronized (self.pendingAgentChannels) {
+        [self.pendingAgentChannels addObject:agentChannel];
+    }
 }
 
 #pragma forward

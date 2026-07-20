@@ -81,6 +81,15 @@ NS_ASSUME_NONNULL_BEGIN
               withOutputDataBuffer:(void (^)(NSString * _Nonnull))withOutputDataBuffer
            withContinuationHandler:(BOOL (^)(void))withContinuationBlock;
 
+#pragma mark agent forwarding
+
+// Enables SSH agent forwarding on the next interactive shell. `handler` is
+// invoked on the event-loop thread with the raw bytes read from the reverse
+// auth-agent channel and returns the bytes to write back (nil/empty while a
+// request is still incomplete). Set it BEFORE beginShellWithTerminalType;
+// passing nil disables forwarding for subsequent shells.
+- (void)installAgentForwardHandler:(nullable NSData * _Nullable (^)(NSData * _Nonnull incoming))handler;
+
 #pragma mark port map
 
 - (void)createPortForwardWithLocalPort:(NSNumber*)localPort
