@@ -71,7 +71,7 @@
 // libssh2 AUTHAGENT callback: `*abstract` is the NSRemoteShell set as the
 // session's user data in libssh2_session_init_ex. Fires on the event-loop
 // thread while a shell-channel read is processing an incoming packet.
-static void crossshell_authagent_open(LIBSSH2_SESSION *session,
+static void sigiltty_authagent_open(LIBSSH2_SESSION *session,
                                       LIBSSH2_CHANNEL *channel,
                                       void **abstract) {
     if (!abstract || !*abstract || !channel) { return; }
@@ -1125,7 +1125,7 @@ continue; \
     // non-fatal — the shell still works, forwarding just won't be offered.
     if (self.agentForwardHandler) {
         libssh2_session_callback_set(session, LIBSSH2_CALLBACK_AUTHAGENT,
-                                     (void *)crossshell_authagent_open);
+                                     (void *)sigiltty_authagent_open);
         while (true) {
             int rc = libssh2_channel_request_auth_agent(channel);
             if (rc == LIBSSH2_ERROR_EAGAIN) { usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT); continue; }
