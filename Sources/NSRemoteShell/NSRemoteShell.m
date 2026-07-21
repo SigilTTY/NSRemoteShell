@@ -1116,7 +1116,24 @@ continue; \
     } while (0);
     
     [channelObject unsafeChannelTerminalSizeUpdate];
-    
+
+    // Agent forwarding (opt-in): register the reverse-channel callback and
+    // ask the server to allow agent requests on this shell. Must happen
+    // BEFORE the shell request — sshd only accepts auth-agent-req while the
+    // session channel is larval, and SSH_AUTH_SOCK is injected into the
+    // environment of processes spawned afterwards. A failure to request is
+    // non-fatal — the shell still works, forwarding just won't be offered.
+    if (self.agentForwardHandler) {
+        libssh2_session_callback_set(session, LIBSSH2_CALLBACK_AUTHAGENT,
+                                     (void *)crossshell_authagent_open);
+        while (true) {
+            int rc = libssh2_channel_request_auth_agent(channel);
+            if (rc == LIBSSH2_ERROR_EAGAIN) { usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT); continue; }
+            if (rc != 0) { NSLog(@"agent forwarding request failed: %d", rc); }
+            break;
+        }
+    }
+
     do {
         BOOL channelStartupCompleted = NO;
         while (true) {
@@ -1131,21 +1148,6 @@ continue; \
             return;
         }
     } while (0);
-
-    // Agent forwarding (opt-in): register the reverse-channel callback and
-    // ask the server to allow agent requests on this shell. A failure to
-    // request is non-fatal — the shell still works, forwarding just won't
-    // be offered.
-    if (self.agentForwardHandler) {
-        libssh2_session_callback_set(session, LIBSSH2_CALLBACK_AUTHAGENT,
-                                     (void *)crossshell_authagent_open);
-        while (true) {
-            int rc = libssh2_channel_request_auth_agent(channel);
-            if (rc == LIBSSH2_ERROR_EAGAIN) { usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT); continue; }
-            if (rc != 0) { NSLog(@"agent forwarding request failed: %d", rc); }
-            break;
-        }
-    }
 
     if (completionSemaphore) {
         [channelObject onTermination:^{
