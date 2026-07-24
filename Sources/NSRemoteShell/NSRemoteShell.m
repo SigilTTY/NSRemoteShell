@@ -62,6 +62,14 @@
 @property (nonatomic, readwrite, strong) NSNumber *keepAliveInterval;
 @property (nonatomic, readwrite) BOOL keepAliveWantReply;
 
+// Stamped by the transport recv hook on every byte from the server
+// (atomic: written on the event-loop thread, read wherever). Drives the
+// keep-alive dead-peer check: with want_reply on, a live server answers
+// every keep-alive, so prolonged silence means the link is gone.
+@property (readwrite, assign) CFAbsoluteTime lastServerDataTimestamp;
+
+@property (nonatomic, readwrite, assign) NSRemoteShellSessionEnd lastShellSessionEnd;
+
 // Called from the libssh2 AUTHAGENT callback (event-loop thread) to take
 // ownership of a reverse auth-agent channel.
 - (void)unsafeAcceptAgentForwardChannel:(LIBSSH2_CHANNEL *)channel;
@@ -77,6 +85,22 @@ static void sigiltty_authagent_open(LIBSSH2_SESSION *session,
     if (!abstract || !*abstract || !channel) { return; }
     NSRemoteShell *shell = (__bridge NSRemoteShell *)(*abstract);
     [shell unsafeAcceptAgentForwardChannel:channel];
+}
+
+// Transport recv hook (LIBSSH2_CALLBACK_RECV): same behavior as libssh2's
+// default (-errno on failure), plus a timestamp on every successful read so
+// the keep-alive check can tell a silent-dead link from a quiet-but-live one.
+static ssize_t sigiltty_transport_recv(libssh2_socket_t sock,
+                                       void *buffer,
+                                       size_t length,
+                                       int flags,
+                                       void **abstract) {
+    ssize_t n = recv(sock, buffer, length, flags);
+    if (n > 0 && abstract && *abstract) {
+        NSRemoteShell *shell = (__bridge NSRemoteShell *)(*abstract);
+        shell.lastServerDataTimestamp = CFAbsoluteTimeGetCurrent();
+    }
+    return (n < 0) ? -errno : n;
 }
 
 @implementation NSRemoteShell
@@ -655,15 +679,34 @@ continue; \
         return;
     }
     self.associatedSocket = sock;
-    
+
+    // TCP keepalive detects a silently dead link (firewall drop, vanished
+    // peer) even with SSH keep-alive disabled: after unanswered probes the
+    // socket errors out and the channel layer ends the session.
+    int tcpKeepAlive = 1;
+    setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &tcpKeepAlive, sizeof(tcpKeepAlive));
+    int tcpKeepIdle = TCP_CONNECTION_KEEPALIVE_IDLE;
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPALIVE, &tcpKeepIdle, sizeof(tcpKeepIdle));
+    int tcpKeepIntvl = TCP_CONNECTION_KEEPALIVE_INTVL;
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, &tcpKeepIntvl, sizeof(tcpKeepIntvl));
+    int tcpKeepCnt = TCP_CONNECTION_KEEPALIVE_CNT;
+    setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, &tcpKeepCnt, sizeof(tcpKeepCnt));
+
     self.resolvedRemoteIpAddress = [GenericNetworking getResolvedIpAddressWith:sock];
-    
+
     LIBSSH2_SESSION *constructorSession = libssh2_session_init_ex(0, 0, 0, (__bridge void*)(self));
     if (!constructorSession) {
         [self unsafeDisconnect];
         return;
     }
     self.associatedSession = constructorSession;
+
+    // Install the recv hook before the handshake so every inbound byte
+    // (handshake included) stamps lastServerDataTimestamp.
+    self.lastServerDataTimestamp = CFAbsoluteTimeGetCurrent();
+    self.lastShellSessionEnd = NSRemoteShellSessionEndUnknown;
+    libssh2_session_callback_set(constructorSession, LIBSSH2_CALLBACK_RECV,
+                                 (void *)sigiltty_transport_recv);
     
     libssh2_session_set_timeout(constructorSession, [self.operationTimeout doubleValue] * 1000);
     
@@ -739,19 +782,24 @@ continue; \
 }
 
 - (void)unsafeDisconnect {
+    // Flip the flags BEFORE releasing the channels: their termination
+    // blocks fire during the release, and the shell-session-end fallback
+    // ("released with no recorded reason while the connection is down =
+    // transport failure") reads isConnected there.
+    self.connected = NO;
+    self.authenticated = NO;
+    self.connectedFileTransfer = NO;
+
     for (id<NSRemoteOperableObject> object in [self.operableObjects copy]) {
         if (object) { [object unsafeDisconnectAndPrepareForRelease]; }
     }
     self.operableObjects = [[NSMutableArray alloc] init];
-    
+
     [self unsafeFileTransferCloseFor:self.associatedFileTransfer];
     self.associatedFileTransfer = NULL;
-    self.connectedFileTransfer = NO;
-    
+
     [self unsafeSessionCloseFor:self.associatedSession];
     self.associatedSession = NULL;
-    self.connected = NO;
-    self.authenticated = NO;
     
     if (self.associatedSocket) {
         [GenericNetworking destroyNativeSocket:self.associatedSocket];
@@ -808,7 +856,27 @@ continue; \
     if (configuredInterval <= 0) {
         return; // Keep-alive is disabled
     }
-    
+
+    // Dead-peer detection (ServerAlive semantics): with want_reply on, a
+    // live server answers every keep-alive, so the transport receives at
+    // least one packet per interval. No inbound bytes for ~3 intervals
+    // means the link is dead (e.g. a firewall silently dropping packets)
+    // even though our sends still "succeed" into the socket buffer.
+    if (self.keepAliveWantReply) {
+        CFAbsoluteTime last = self.lastServerDataTimestamp;
+        double silence = CFAbsoluteTimeGetCurrent() - last;
+        double window = MAX(configuredInterval * 3.0, 10.0);
+        if (last > 0 && silence > window) {
+            NSLog(@"shell object at %p: no data from server for %.0fs (keep-alive every %ds) — closing dead connection", self, silence, configuredInterval);
+            // Recorded BEFORE the disconnect: the channel teardown below can
+            // take seconds on a dead link, and readers must not see the flag
+            // flip without the reason.
+            self.lastShellSessionEnd = NSRemoteShellSessionEndTransportError;
+            [self unsafeDisconnect];
+            return;
+        }
+    }
+
     if (self.keepAliveLastSuccessAttampt) {
         NSDate *nextRun = [self.keepAliveLastSuccessAttampt dateByAddingTimeInterval:configuredInterval];
         if ([nextRun timeIntervalSinceNow] >= 0) {
@@ -832,6 +900,7 @@ continue; \
         // treat anything else as error and close if retry too much times
         if (self.keepAliveAttampt > KEEPALIVE_ERROR_TOLERANCE_MAX_RETRY) {
             NSLog(@"shell object at %p closing session due to broken pipe", self);
+            self.lastShellSessionEnd = NSRemoteShellSessionEndTransportError;
             [self unsafeDisconnect];
             return;
         }
@@ -859,13 +928,24 @@ continue; \
 
 - (void)unsafeFileTransferCloseFor:(LIBSSH2_SFTP*)sftp {
     if (!sftp) return;
-    while (libssh2_sftp_shutdown(sftp) == LIBSSH2_ERROR_EAGAIN) {};
+    LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_sftp_shutdown(sftp));
 }
 
 - (void)unsafeSessionCloseFor:(LIBSSH2_SESSION*)session {
     if (!session) return;
-    while (libssh2_session_disconnect(session, "closed by client") == LIBSSH2_ERROR_EAGAIN) {};
-    while (libssh2_session_free(session) == LIBSSH2_ERROR_EAGAIN) {};
+    // Bounded: on a dead link the goodbye can never be delivered and an
+    // unbounded EAGAIN retry would hang the event loop thread forever. If
+    // the graceful disconnect stalls past the grace period, force the
+    // socket dead so the remaining teardown fails fast instead of spinning.
+    NSDate *disconnectDeadline = [[NSDate alloc] initWithTimeIntervalSinceNow:LIBSSH2_SHUTDOWN_GRACE_SECONDS];
+    while (libssh2_session_disconnect(session, "closed by client") == LIBSSH2_ERROR_EAGAIN) {
+        if ([disconnectDeadline timeIntervalSinceNow] < 0) {
+            if (self.associatedSocket) { shutdown(self.associatedSocket, SHUT_RDWR); }
+            break;
+        }
+        usleep(10000);
+    }
+    LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_session_free(session));
 }
 
 - (BOOL)unsafeValidateSession {
@@ -1150,11 +1230,32 @@ continue; \
     } while (0);
 
     if (completionSemaphore) {
+        // Unretained: termination always runs on the channel object itself,
+        // so the reference is valid even when it fires from dealloc (where a
+        // __weak read is already nil) — and it avoids the channel → block →
+        // channel retain cycle a strong capture would create.
+        __unsafe_unretained NSRemoteChannel *rawChannel = channelObject;
+        __weak typeof(self) weakSelf = self;
         [channelObject onTermination:^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf) {
+                NSRemoteShellSessionEnd reason = rawChannel.terminationReason;
+                if (reason != NSRemoteShellSessionEndUnknown) {
+                    // The channel saw the cause itself (EOF, socket error,
+                    // continuation stop) — most specific, always wins.
+                    strongSelf.lastShellSessionEnd = reason;
+                } else if (strongSelf.lastShellSessionEnd == NSRemoteShellSessionEndUnknown
+                           && !strongSelf.isConnected) {
+                    // Shell-level teardown released the channel without its
+                    // own cause and nothing pre-recorded one (keep-alive
+                    // paths do) — a dead connection means the transport broke.
+                    strongSelf.lastShellSessionEnd = NSRemoteShellSessionEndTransportError;
+                }
+            }
             DISPATCH_SEMAPHORE_CHECK_SIGNLE(completionSemaphore);
         }];
     }
-    
+
     [self.operableObjects addObject:channelObject];
     if (withOnCreate) { withOnCreate(); }
 }
@@ -1171,8 +1272,8 @@ continue; \
     NSRemoteAgentForwardHandler handler = self.agentForwardHandler;
     if (!handler) {
         // Forwarding was disabled after the request — refuse by closing.
-        while (libssh2_channel_close(channel) == LIBSSH2_ERROR_EAGAIN) {};
-        while (libssh2_channel_free(channel) == LIBSSH2_ERROR_EAGAIN) {};
+        LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_channel_close(channel));
+        LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_channel_free(channel));
         return;
     }
     NSRemoteChannelAgentForward *agentChannel =
@@ -1502,7 +1603,7 @@ continue; \
         }
     } while (rc > 0);
     
-    while (libssh2_sftp_closedir(handle) == LIBSSH2_ERROR_EAGAIN) {};
+    LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_sftp_closedir(handle));
     if (rc < 0) {
         [self unsafeFileTransferSetErrorForFile:withDirPath pathIsRemote:YES failureReason:@"remote permission denied"];
         return NULL;
@@ -1551,7 +1652,7 @@ continue; \
         break;
     }
     
-    while (libssh2_sftp_closedir(handle) == LIBSSH2_ERROR_EAGAIN) {};
+    LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_sftp_closedir(handle));
     
     if (!statSuccess) {
         [self unsafeFileTransferSetErrorForFile:atPath pathIsRemote:YES failureReason:@"remote permission denied"];

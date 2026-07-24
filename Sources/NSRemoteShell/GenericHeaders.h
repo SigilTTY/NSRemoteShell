@@ -14,6 +14,7 @@
 
 #import <arpa/inet.h>
 #import <netinet/in.h>
+#import <netinet/tcp.h>
 #import <sys/socket.h>
 #import <netdb.h>
 
@@ -64,14 +65,45 @@ if ((SEM)) { dispatch_semaphore_signal((SEM)); } \
 } while (0);
 
 /*
+ how long a graceful shutdown step may keep retrying on EAGAIN before we
+ give up on it — on a dead link (blackholed socket, peer gone) close/
+ wait-closed replies never arrive and an unbounded retry loop would wedge
+ the event loop thread forever
+ */
+#define LIBSSH2_SHUTDOWN_GRACE_SECONDS 2
+
+/*
+ retry EXPR while it returns EAGAIN, but never past the grace deadline;
+ sleeps between attempts so a stalled step doesn't spin a core
+ */
+#define LIBSSH2_BOUNDED_SHUTDOWN_STEP(EXPR) do { \
+NSDate *stepDeadline = [[NSDate alloc] initWithTimeIntervalSinceNow:LIBSSH2_SHUTDOWN_GRACE_SECONDS]; \
+while ((EXPR) == LIBSSH2_ERROR_EAGAIN) { \
+if ([stepDeadline timeIntervalSinceNow] < 0) { break; } \
+usleep(10000); \
+} \
+} while (0);
+
+/*
  common used libssh2 channel gracefully shutdown all in one
  */
 #define LIBSSH2_CHANNEL_SHUTDOWN(CHANNEL) do { \
-while (libssh2_channel_send_eof(CHANNEL) == LIBSSH2_ERROR_EAGAIN) {}; \
-while (libssh2_channel_close(CHANNEL) == LIBSSH2_ERROR_EAGAIN) {}; \
-while (libssh2_channel_wait_closed(CHANNEL) == LIBSSH2_ERROR_EAGAIN) {}; \
-while (libssh2_channel_free(CHANNEL) == LIBSSH2_ERROR_EAGAIN) {}; \
+LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_channel_send_eof(CHANNEL)); \
+LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_channel_close(CHANNEL)); \
+LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_channel_wait_closed(CHANNEL)); \
+LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_channel_free(CHANNEL)); \
 } while (0);
+
+/*
+ TCP-level keepalive on the SSH transport socket: detects a silently dead
+ link (firewall drop, vanished peer) even when SSH-level keep-alive is
+ disabled — probes start after IDLE seconds of silence, and the socket
+ errors out after CNT unanswered probes INTVL seconds apart; the channel
+ layer treats that error as session end
+ */
+#define TCP_CONNECTION_KEEPALIVE_IDLE  15
+#define TCP_CONNECTION_KEEPALIVE_INTVL 5
+#define TCP_CONNECTION_KEEPALIVE_CNT   3
 
 /*
  represent socket option at queue_maxsize, can be any size

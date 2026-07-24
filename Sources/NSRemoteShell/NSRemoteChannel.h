@@ -19,6 +19,11 @@ typedef void (^NSRemoteChannelReceiveDataBlock)(NSString *);
 typedef BOOL (^NSRemoteChannelContinuationBlock)(void);
 typedef CGSize (^NSRemoteChannelTerminalSizeBlock)(void);
 
+/// Why this channel completed (first detected cause wins; Unknown until
+/// something terminal happens). Read by NSRemoteShell when the shell
+/// channel's termination fires.
+@property (nonatomic, readonly) NSRemoteShellSessionEnd terminationReason;
+
 @property (nonatomic, nullable, readonly, assign) LIBSSH2_SESSION *representedSession;
 @property (nonatomic, nullable, readonly, assign) LIBSSH2_CHANNEL *representedChannel;
 

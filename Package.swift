@@ -19,5 +19,11 @@ let package = Package(
             dependencies: ["CSSH"],
             publicHeadersPath: "include"
         ),
+        // Dead-connection detection regression tests (real sshd + cuttable
+        // TCP proxy). Run with `swift test` in this package; macOS only.
+        .testTarget(
+            name: "NSRemoteShellNetworkTests",
+            dependencies: ["NSRemoteShell"]
+        ),
     ]
 )

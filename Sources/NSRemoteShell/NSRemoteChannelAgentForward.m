@@ -102,9 +102,9 @@
     self.representedChannel = NULL;
     self.representedSession = NULL;
     self.handler = NULL;
-    while (libssh2_channel_send_eof(channel) == LIBSSH2_ERROR_EAGAIN) {};
-    while (libssh2_channel_close(channel) == LIBSSH2_ERROR_EAGAIN) {};
-    while (libssh2_channel_free(channel) == LIBSSH2_ERROR_EAGAIN) {};
+    LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_channel_send_eof(channel));
+    LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_channel_close(channel));
+    LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_channel_free(channel));
 }
 
 @end

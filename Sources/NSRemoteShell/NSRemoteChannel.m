@@ -24,6 +24,7 @@
 
 @property (nonatomic, readwrite) BOOL channelCompleted;
 @property (nonatomic, readwrite, assign) int exitStatus;
+@property (nonatomic, readwrite, assign) NSRemoteShellSessionEnd terminationReason;
 
 @end
 
@@ -41,6 +42,7 @@
         _channelCompleted = NO;
         _currentTerminalSize = CGSizeMake(0, 0);
         _exitStatus = 0;
+        _terminationReason = NSRemoteShellSessionEndUnknown;
     }
     return self;
 }
@@ -94,6 +96,14 @@
     }
 }
 
+// First detected cause wins — later, less specific causes (e.g. the eof
+// probe erroring on an already-released channel) must not overwrite it.
+- (void)recordTerminationReason:(NSRemoteShellSessionEnd)reason {
+    if (_terminationReason == NSRemoteShellSessionEndUnknown) {
+        _terminationReason = reason;
+    }
+}
+
 // MARK: - EXEC
 
 - (BOOL)seatbeltCheckPassed {
@@ -110,7 +120,19 @@
     
     long rcout = libssh2_channel_read(self.representedChannel, buffer, (ssize_t)sizeof(buffer));
     long rcerr = libssh2_channel_read_stderr(self.representedChannel, errorBuffer, (ssize_t)sizeof(errorBuffer));
-    
+
+    // Any error besides EAGAIN is terminal (socket recv/send failure after a
+    // network cut, channel closed, protocol error) — the session will never
+    // recover, so end the channel instead of silently retrying forever with
+    // the connection still reported alive.
+    if ((rcout < 0 && rcout != LIBSSH2_ERROR_EAGAIN) ||
+        (rcerr < 0 && rcerr != LIBSSH2_ERROR_EAGAIN)) {
+        NSLog(@"channel read failed (%ld/%ld), terminating channel", rcout, rcerr);
+        [self recordTerminationReason:NSRemoteShellSessionEndTransportError];
+        self.channelCompleted = YES;
+        return;
+    }
+
     if (rcout != LIBSSH2_ERROR_EAGAIN && rcout > 0) {
         NSString *read = [[NSString alloc] initWithUTF8String:buffer];
         if (self.receiveDataBlock) {
@@ -138,6 +160,9 @@
         NSLog(@"error occurred during message encode, ignoring empty data");
         return;
     }
+    // Bounded: on a dead link the send buffer fills and EAGAIN repeats
+    // forever — an unbounded retry here would wedge the event loop thread.
+    NSDate *writeDeadline = [[NSDate alloc] initWithTimeIntervalSinceNow:LIBSSH2_SHUTDOWN_GRACE_SECONDS];
     while (true) {
         if ([self unsafeChannelShouldTerminate]) {
             break;
@@ -145,10 +170,17 @@
         // Actual number of bytes written or negative on failure.
         long rc = libssh2_channel_write(self.representedChannel, [data bytes], [data length]);
         if (rc == LIBSSH2_ERROR_EAGAIN) {
+            if ([writeDeadline timeIntervalSinceNow] < 0) {
+                NSLog(@"channel write stalled past grace period, dropping buffered input");
+                break;
+            }
+            usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT);
             continue;
         }
         if (rc < 0) {
-            NSLog(@"error occurred during message write, consider terminated channel");
+            NSLog(@"channel write failed (%ld), terminating channel", rc);
+            [self recordTerminationReason:NSRemoteShellSessionEndTransportError];
+            self.channelCompleted = YES;
             break;
         }
         if (rc != [data length]) {
@@ -164,16 +196,20 @@
     do {
         if (self.scheduledTermination && [self.scheduledTermination timeIntervalSinceNow] < 0) {
             NSLog(@"channel terminating due to timeout schedule");
+            [self recordTerminationReason:NSRemoteShellSessionEndContinuationEnded];
             break;
         }
         if (self.continuationDecisionBlock && !self.continuationDecisionBlock()) {
+            [self recordTerminationReason:NSRemoteShellSessionEndContinuationEnded];
             break;
         }
         long rc = libssh2_channel_eof(self.representedChannel);
         if (rc == 1) {
+            [self recordTerminationReason:NSRemoteShellSessionEndRemoteClosed];
             break;
         }
         if (rc < 0 && rc != LIBSSH2_ERROR_EAGAIN) {
+            [self recordTerminationReason:NSRemoteShellSessionEndTransportError];
             break;
         }
         return NO;
@@ -209,8 +245,12 @@
     if (self.channelCompleted) { return; }
     if (![self seatbeltCheckPassed]) { return; }
     [self unsafeChannelRead];
+    // A fatal read/write releases the channel mid-pass (setChannelCompleted
+    // side effect) — the remaining steps must not touch the freed channel.
+    if (self.channelCompleted) { return; }
     [self unsafeChannelTerminalSizeUpdate];
     [self unsafeChannelWrite];
+    if (self.channelCompleted) { return; }
     [self unsafeChannelShouldTerminate];
 }
 
@@ -230,13 +270,16 @@
     LIBSSH2_CHANNEL *channel = self.representedChannel;
     self.representedChannel = NULL;
     self.representedSession = NULL;
-    while (libssh2_channel_send_eof(channel) == LIBSSH2_ERROR_EAGAIN) {};
-    while (libssh2_channel_close(channel) == LIBSSH2_ERROR_EAGAIN) {};
-    while (libssh2_channel_wait_closed(channel) == LIBSSH2_ERROR_EAGAIN) {};
+    // Bounded: after a network cut the close/wait-closed replies never
+    // arrive; retrying EAGAIN forever would hang whichever thread runs the
+    // teardown (event loop or bootstrap) with the tab stuck open.
+    LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_channel_send_eof(channel));
+    LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_channel_close(channel));
+    LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_channel_wait_closed(channel));
     int es = libssh2_channel_get_exit_status(channel);
     NSLog(@"channel get exit status returns: %d", es);
     self.exitStatus = es;
-    while (libssh2_channel_free(channel) == LIBSSH2_ERROR_EAGAIN) {};
+    LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_channel_free(channel));
     if (self.terminationBlock) { self.terminationBlock(); }
     self.terminationBlock = NULL;
 }

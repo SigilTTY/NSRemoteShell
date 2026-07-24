@@ -12,6 +12,20 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/// Why the last shell channel ended — lets the app distinguish a clean
+/// remote close (`exit`, server logout) from a broken link (network cut)
+/// and from its own decision to stop.
+typedef NS_ENUM(NSInteger, NSRemoteShellSessionEnd) {
+    NSRemoteShellSessionEndUnknown = 0,
+    /// The remote sent EOF / closed the channel in an orderly way.
+    NSRemoteShellSessionEndRemoteClosed,
+    /// A socket or protocol error killed the transport (cut network,
+    /// keep-alive dead-peer detection, RST).
+    NSRemoteShellSessionEndTransportError,
+    /// The continuation handler asked to stop (app/user initiated).
+    NSRemoteShellSessionEndContinuationEnded,
+};
+
 @interface NSRemoteShell : NSObject
 
 @property (nonatomic, readonly, getter=isConnected) BOOL connected;
@@ -32,6 +46,10 @@ NS_ASSUME_NONNULL_BEGIN
 @property (nonatomic, readonly, strong) NSNumber *keepAliveInterval;
 @property (nonatomic, readonly) BOOL keepAliveWantReply;
 @property (nonatomic, readonly) NSInteger lastUsedLocalPort;
+
+/// Why the last interactive shell (beginShellWithTerminalType…) ended.
+/// Reset to Unknown on every connect attempt.
+@property (nonatomic, readonly) NSRemoteShellSessionEnd lastShellSessionEnd;
 
 #pragma mark initializer
 

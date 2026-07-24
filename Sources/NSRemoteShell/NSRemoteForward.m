@@ -139,7 +139,7 @@
     self.representedSession = NULL;
     LIBSSH2_LISTENER *listener = self.representedListener;
     self.representedListener = NULL;
-    while (libssh2_channel_forward_cancel(listener) == LIBSSH2_ERROR_EAGAIN) {};
+    LIBSSH2_BOUNDED_SHUTDOWN_STEP(libssh2_channel_forward_cancel(listener));
     for (NSRemoteChannelSocketPair *pair in self.forwardSocketPair) {
         [pair unsafeDisconnectAndPrepareForRelease];
     }
