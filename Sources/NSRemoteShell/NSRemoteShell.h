@@ -108,6 +108,16 @@ typedef NS_ENUM(NSInteger, NSRemoteShellSessionEnd) {
 // passing nil disables forwarding for subsequent shells.
 - (void)installAgentForwardHandler:(nullable NSData * _Nullable (^)(NSData * _Nonnull incoming))handler;
 
+#pragma mark shell environment
+
+// Environment variables to request on the next interactive shell (e.g.
+// COLORTERM=truecolor). Each pair is sent as an SSH `env` channel request
+// right before the pty/shell request. Set it BEFORE beginShellWithTerminalType;
+// passing nil/empty clears it for subsequent shells. A rejected request is
+// non-fatal — the shell still opens — and sshd only honors variables listed in
+// its `AcceptEnv` allowlist, so delivery is best-effort.
+- (void)installShellEnvironment:(nullable NSDictionary<NSString*, NSString*>*)environment;
+
 #pragma mark port map
 
 - (void)createPortForwardWithLocalPort:(NSNumber*)localPort

@@ -56,6 +56,8 @@
 @property (nonatomic, readwrite, nullable, strong) NSRemoteAgentForwardHandler agentForwardHandler;
 @property (nonatomic, readwrite, nonnull, strong) NSMutableArray<id<NSRemoteOperableObject>> *pendingAgentChannels;
 
+@property (nonatomic, readwrite, nullable, strong) NSDictionary<NSString*, NSString*> *shellEnvironment;
+
 @property (nonatomic, readwrite, assign) unsigned keepAliveAttampt;
 @property (nonatomic, readwrite, nullable, strong) NSDate *keepAliveLastSuccessAttampt;
 
@@ -1173,7 +1175,25 @@ continue; \
     if (requestWriteData) { [channelObject setRequestDataChain:requestWriteData]; }
     if (responseDataBlock) { [channelObject setReceivedDataChain:responseDataBlock]; }
     if (continuationBlock) { [channelObject setContinuationChain:continuationBlock]; }
-    
+
+    // Environment variables (e.g. COLORTERM=truecolor) via SSH `env` requests,
+    // sent before the pty request. Best-effort: sshd only honors AcceptEnv-
+    // listed vars, so a rejection is logged and ignored — the shell still opens.
+    NSDictionary<NSString*, NSString*> *shellEnvironment = self.shellEnvironment;
+    for (NSString *envKey in shellEnvironment) {
+        NSString *envValue = shellEnvironment[envKey];
+        const char *envKeyC = [envKey UTF8String];
+        const char *envValueC = [envValue UTF8String];
+        while (true) {
+            int rc = libssh2_channel_setenv_ex(channel,
+                                               (char *)envKeyC, (unsigned int)strlen(envKeyC),
+                                               (char *)envValueC, (unsigned int)strlen(envValueC));
+            if (rc == LIBSSH2_ERROR_EAGAIN) { usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT); continue; }
+            if (rc != 0) { NSLog(@"setenv %@ rejected: %d (non-fatal)", envKey, rc); }
+            break;
+        }
+    }
+
     do {
         NSString *requestPseudoTermial = @"xterm";
         if (terminalType) { requestPseudoTermial = terminalType; }
@@ -1265,6 +1285,14 @@ continue; \
 - (void)installAgentForwardHandler:(nullable NSData * _Nullable (^)(NSData * _Nonnull))handler {
     @synchronized (self) {
         self.agentForwardHandler = handler;
+    }
+}
+
+#pragma mark shell environment
+
+- (void)installShellEnvironment:(nullable NSDictionary<NSString*, NSString*>*)environment {
+    @synchronized (self) {
+        self.shellEnvironment = environment.count ? [environment copy] : nil;
     }
 }
 
