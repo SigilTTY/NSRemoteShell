@@ -96,7 +96,11 @@ typedef NS_ENUM(NSInteger, NSRemoteShellSessionEnd) {
                       withOnCreate:(dispatch_block_t)withOnCreate
                   withTerminalSize:(nullable CGSize (^)(void))withRequestTerminalSize
                withWriteDataBuffer:(nullable NSString* (^)(void))withWriteDataBuffer
-              withOutputDataBuffer:(void (^)(NSString * _Nonnull))withOutputDataBuffer
+// Output is delivered as raw bytes: a pty stream carries arbitrary encodings
+// and control sequences, so decoding it to a string here would drop every
+// chunk that is not valid UTF-8. Callers own the decoding (the terminal feeds
+// the bytes straight to the emulator).
+              withOutputDataBuffer:(void (^)(NSData * _Nonnull))withOutputDataBuffer
            withContinuationHandler:(BOOL (^)(void))withContinuationBlock;
 
 #pragma mark agent forwarding

@@ -375,7 +375,7 @@ continue; \
                       withOnCreate:(dispatch_block_t)withOnCreate
                   withTerminalSize:(nullable CGSize (^)(void))withRequestTerminalSize
                withWriteDataBuffer:(nullable NSString* (^)(void))withWriteDataBuffer
-              withOutputDataBuffer:(void (^)(NSString * _Nonnull))withOutputDataBuffer
+              withOutputDataBuffer:(void (^)(NSData * _Nonnull))withOutputDataBuffer
            withContinuationHandler:(BOOL (^)(void))withContinuationBlock;
 {
     if (self.destroyed) return;
@@ -1112,9 +1112,18 @@ continue; \
         [channelObject setChannelTimeoutWith:[timeoutSecond doubleValue]];
     }
     
-    if (responseDataBlock) { [channelObject setReceivedDataChain:responseDataBlock]; }
+    // exec's public API is text while the channel now hands up raw bytes.
+    // Decode as UTF-8 and fall back to Latin-1 — which cannot fail and maps
+    // byte-for-byte — so a non-UTF-8 chunk degrades instead of vanishing.
+    if (responseDataBlock) {
+        [channelObject setReceivedDataChain:^(NSData *data) {
+            NSString *text = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+            if (!text) { text = [[NSString alloc] initWithData:data encoding:NSISOLatin1StringEncoding]; }
+            if (text) { responseDataBlock(text); }
+        }];
+    }
     if (continuationBlock) { [channelObject setContinuationChain:continuationBlock]; }
-    
+
     if (completionSemaphore) {
         [channelObject onTermination:^{
             *exitCode = channelObject.exitStatus;
@@ -1129,7 +1138,7 @@ continue; \
 - (void)unsafeOpenShellWithTerminal:(nullable NSString*)terminalType
                    withTerminalSize:(nullable CGSize (^)(void))requestTerminalSize
                       withWriteData:(nullable NSString* (^)(void))requestWriteData
-                         withOutput:(void (^)(NSString * _Nonnull))responseDataBlock
+                         withOutput:(void (^)(NSData * _Nonnull))responseDataBlock
                        withOnCreate:(dispatch_block_t)withOnCreate
             withContinuationHandler:(BOOL (^)(void))continuationBlock
             withCompletionSemaphore:(dispatch_semaphore_t)completionSemaphore {

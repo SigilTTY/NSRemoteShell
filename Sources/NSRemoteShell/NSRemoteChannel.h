@@ -15,7 +15,11 @@ NS_ASSUME_NONNULL_BEGIN
 @interface NSRemoteChannel : NSObject <NSRemoteOperableObject>
 
 typedef NSString* _Nonnull (^NSRemoteChannelRequestDataBlock)(void);
-typedef void (^NSRemoteChannelReceiveDataBlock)(NSString *);
+// Raw bytes as read from the channel — NOT a string. Terminal output is a byte
+// stream that is routinely invalid UTF-8 (vim's t_u7 ambiguous-width probe
+// emits a bare 0xbd, binaries get cat'ed, multi-byte characters straddle chunk
+// boundaries) and may contain NULs; decoding here would lose whole reads.
+typedef void (^NSRemoteChannelReceiveDataBlock)(NSData *);
 typedef BOOL (^NSRemoteChannelContinuationBlock)(void);
 typedef CGSize (^NSRemoteChannelTerminalSizeBlock)(void);
 

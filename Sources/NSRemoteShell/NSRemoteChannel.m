@@ -113,11 +113,13 @@
 }
 
 - (void)unsafeChannelRead {
+    // Deliberately not zeroed: every consumer below is bounded by the byte
+    // count libssh2 returns, so the tail is never read. Clearing 2×128 KB on
+    // every pass — including the EAGAIN no-data passes this loop spins
+    // through — was only ever there to NUL-terminate for a string decode.
     char buffer[BUFFER_SIZE];
     char errorBuffer[BUFFER_SIZE];
-    memset(buffer, 0, sizeof(buffer));
-    memset(errorBuffer, 0, sizeof(errorBuffer));
-    
+
     long rcout = libssh2_channel_read(self.representedChannel, buffer, (ssize_t)sizeof(buffer));
     long rcerr = libssh2_channel_read_stderr(self.representedChannel, errorBuffer, (ssize_t)sizeof(errorBuffer));
 
@@ -133,14 +135,17 @@
         return;
     }
 
+    // Length-delimited, never decoded here: initWithUTF8String: returns nil for
+    // a chunk that is not valid UTF-8 (silently dropping the entire read) and
+    // stops at the first NUL regardless of how many bytes were actually read.
     if (rcout != LIBSSH2_ERROR_EAGAIN && rcout > 0) {
-        NSString *read = [[NSString alloc] initWithUTF8String:buffer];
+        NSData *read = [[NSData alloc] initWithBytes:buffer length:rcout];
         if (self.receiveDataBlock) {
             self.receiveDataBlock(read);
         }
     }
     if (rcerr != LIBSSH2_ERROR_EAGAIN && rcerr > 0) {
-        NSString *read = [[NSString alloc] initWithUTF8String:errorBuffer];
+        NSData *read = [[NSData alloc] initWithBytes:errorBuffer length:rcerr];
         if (self.receiveDataBlock) {
             self.receiveDataBlock(read);
         }
