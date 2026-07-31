@@ -1,17 +1,19 @@
 # NSRemoteShell
 
+> **SigilTTY lineage (`sigiltty` branch).** This branch carries the
+> Objective-C NSRemoteShell as vendored into [SigilTTY](https://sigiltty.com)
+> (imported from Rayon, full modification history preserved), while upstream's
+> `main` has since been rewritten in Swift. SigilTTY additions include: raw
+> `Data` channel output (no lossy UTF-8 decode), TOFU host-key surface,
+> SFTP realpath, dead-link detection via keep-alive want-reply, session end
+> reasons, in-app SSH agent forwarding (`NSRemoteChannelAgentForward`), and
+> FIDO security-key authentication (webauthn-sk) backed by the patched
+> libssh2 from [SigilTTY/Libssh2Prebuild](https://github.com/SigilTTY/Libssh2Prebuild),
+> consumed as a URL binary target — no submodules or vendored binaries needed.
+
+
 Remote shell using libssh2 with Objective-C. Thread safe implementation. Available as Swift Package.
 
-## git
-
-`libssh2` prebuilt binaries are required to build this package. Either clone with recursive submodules or update after clone. Bitcode is available.
-
-> git submodule update --init --recursive --remote
-
-See following options to learn more.
-
-- https://github.com/Lakr233/CSSH 
-- https://github.com/DimaRU/Libssh2Prebuild
 
 ## Usage
 
