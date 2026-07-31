@@ -105,12 +105,11 @@ static ssize_t sigiltty_transport_recv(libssh2_socket_t sock,
     return (n < 0) ? -errno : n;
 }
 
-// The webauthn-sk sign path touches LIBSSH2_SK_SIG_INFO fields that only exist
-// in the patched CSSH header, and only the macOS and iOS (device + simulator)
-// slices ship the matching patched binary. On stock-slice platforms
-// (Catalyst/tvOS/visionOS) the header/binary lack those fields (writing them
-// would corrupt the smaller stack struct), so the SK sign machinery stays off
-// there until the prebuilt xcframework is re-emitted for all slices
+// The webauthn-sk sign path needs the patched CSSH slice (SigilTTY/
+// Libssh2Prebuild fork — every slice carries it since the 2026-07-31 build).
+// The guard now only scopes the API to the platforms the app actually
+// supports security keys on: macOS and iOS proper. Catalyst/tvOS/visionOS
+// keep it off — no matching ASAuthorization security-key UI there
 // (docs/design/fido-keys.md).
 #if TARGET_OS_OSX || (TARGET_OS_IOS && !TARGET_OS_MACCATALYST)
 

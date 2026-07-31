@@ -12,10 +12,11 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-// The webauthn-sk auth API depends on the patched CSSH slice — carried today
-// by the macOS and iOS (device + simulator) slices; Catalyst/tvOS/visionOS
-// remain stock, so the type/method don't exist there. Keep the public surface
-// in lockstep with the .m guards (docs/design/fido-keys.md).
+// The webauthn-sk auth API needs the patched CSSH slice (every slice carries
+// it since the SigilTTY/Libssh2Prebuild 2026-07-31 build); the guard scopes
+// it to the platforms with a security-key ASAuthorization UI — macOS and iOS
+// proper. Keep the public surface in lockstep with the .m guards
+// (docs/design/fido-keys.md).
 #if TARGET_OS_OSX || (TARGET_OS_IOS && !TARGET_OS_MACCATALYST)
 
 /// The output of a platform WebAuthn getAssertion, handed back to the SSH
