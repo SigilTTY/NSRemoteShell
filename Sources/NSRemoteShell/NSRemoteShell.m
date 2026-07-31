@@ -105,6 +105,111 @@ static ssize_t sigiltty_transport_recv(libssh2_socket_t sock,
     return (n < 0) ? -errno : n;
 }
 
+// The webauthn-sk sign path touches LIBSSH2_SK_SIG_INFO fields that only exist
+// in the patched CSSH header, and only the macOS CSSH slice ships the matching
+// patched binary. On other platforms the stock header/binary lack those fields
+// (writing them would corrupt the smaller stack struct), so the whole SK sign
+// machinery is macOS-only until the prebuilt xcframework is re-emitted for all
+// slices (docs/design/fido-keys.md).
+#if TARGET_OS_OSX
+
+// Context threaded through libssh2's SK abstract pointer down to the sign
+// callback. `libssh2_userauth_publickey_sk(session, …, &skAbstract)` stores our
+// pointer as sk_info.orig_abstract, and libssh2_sign_sk hands that same pointer
+// back as the callback's `void **abstract` — so *abstract is &(this struct).
+typedef struct {
+    __unsafe_unretained NSRemoteShellSKAssertionProvider provider;
+    const char *origin;   // borrowed C string, not owned
+} SigilttySKSignContext;
+
+// Extract raw 32-byte r and s from an ASN.1 DER ECDSA signature
+// (SEQUENCE { INTEGER r, INTEGER s }); P-256 component lengths always fit in
+// one length byte. Leading DER sign-pad zeros are trimmed then the value is
+// left-padded into a fixed 32-byte field (libssh2's mpint store re-adds the
+// OpenSSH leading zero when the MSB is set).
+static BOOL sigiltty_der_to_rs(const unsigned char *der, size_t derlen,
+                               unsigned char r[32], unsigned char s[32]) {
+    if (!der || derlen < 8 || der[0] != 0x30) { return NO; }
+    size_t i = 1;
+    if (der[i++] & 0x80) { return NO; }               // long-form seq length: unexpected
+    if (i >= derlen || der[i++] != 0x02) { return NO; }
+    size_t rlen = der[i++];
+    if (rlen == 0 || i + rlen > derlen) { return NO; }
+    const unsigned char *rp = der + i; i += rlen;
+    if (i >= derlen || der[i++] != 0x02) { return NO; }
+    size_t slen = der[i++];
+    if (slen == 0 || i + slen > derlen) { return NO; }
+    const unsigned char *sp = der + i;
+    while (rlen > 0 && *rp == 0x00) { rp++; rlen--; }
+    while (slen > 0 && *sp == 0x00) { sp++; slen--; }
+    if (rlen > 32 || slen > 32) { return NO; }
+    memset(r, 0, 32); memcpy(r + (32 - rlen), rp, rlen);
+    memset(s, 0, 32); memcpy(s + (32 - slen), sp, slen);
+    return YES;
+}
+
+// libssh2 SK sign callback (webauthn-sk variant). Runs on the event-loop
+// thread; blocks inside the provider until the platform WebAuthn assertion is
+// available, then fills LIBSSH2_SK_SIG_INFO. All five out-buffers are malloc'd
+// here and freed by libssh2's session allocator (default = malloc/free, since
+// the session is built with libssh2_session_init_ex(0,0,0,…)).
+static LIBSSH2_USERAUTH_SK_SIGN_FUNC(sigiltty_sk_sign) {
+    (void)session; (void)algorithm; (void)flags;
+    (void)application; (void)key_handle; (void)handle_len;
+    if (!abstract || !*abstract) { return -1; }
+    SigilttySKSignContext *ctx = (SigilttySKSignContext *)(*abstract);
+    if (!ctx->provider) { return -1; }
+
+    @autoreleasepool {
+        NSData *challenge = [NSData dataWithBytes:data length:data_len];
+        NSRemoteShellSKAssertion *assertion = ctx->provider(challenge);
+        if (!assertion || !assertion.signatureDER ||
+            !assertion.authenticatorData || !assertion.clientDataJSON) {
+            return -1;
+        }
+        const unsigned char *ad = assertion.authenticatorData.bytes;
+        size_t adlen = assertion.authenticatorData.length;
+        if (adlen < 37) { return -1; }
+
+        unsigned char r[32], s[32];
+        if (!sigiltty_der_to_rs(assertion.signatureDER.bytes,
+                                assertion.signatureDER.length, r, s)) {
+            return -1;
+        }
+
+        sig_info->sig_r = malloc(32); memcpy(sig_info->sig_r, r, 32);
+        sig_info->sig_r_len = 32;
+        sig_info->sig_s = malloc(32); memcpy(sig_info->sig_s, s, 32);
+        sig_info->sig_s_len = 32;
+        sig_info->flags = ad[32];
+        sig_info->counter = ((uint32_t)ad[33] << 24) | ((uint32_t)ad[34] << 16) |
+                            ((uint32_t)ad[35] << 8)  |  (uint32_t)ad[36];
+
+        sig_info->use_webauthn = 1;
+        const char *origin = ctx->origin ? ctx->origin : "https://sigiltty.com";
+        size_t olen = strlen(origin);
+        sig_info->webauthn_origin = malloc(olen ? olen : 1);
+        memcpy(sig_info->webauthn_origin, origin, olen);
+        sig_info->webauthn_origin_len = olen;
+
+        size_t cdlen = assertion.clientDataJSON.length;
+        sig_info->webauthn_client_data = malloc(cdlen ? cdlen : 1);
+        memcpy(sig_info->webauthn_client_data, assertion.clientDataJSON.bytes, cdlen);
+        sig_info->webauthn_client_data_len = cdlen;
+
+        size_t extlen = adlen - 37;   // authenticator extensions (empty for YubiKey)
+        sig_info->webauthn_extensions = malloc(extlen ? extlen : 1);
+        if (extlen) { memcpy(sig_info->webauthn_extensions, ad + 37, extlen); }
+        sig_info->webauthn_extensions_len = extlen;
+    }
+    return 0;
+}
+
+@implementation NSRemoteShellSKAssertion
+@end
+
+#endif // TARGET_OS_OSX — SK sign machinery
+
 @implementation NSRemoteShell
 
 #pragma mark init
@@ -341,6 +446,31 @@ continue; \
     [self.associatedLoop explicitRequestHandle];
     MakeDispatchSemaphoreWaitWithTimeout(sem)
 }
+
+#if TARGET_OS_OSX
+- (void)authenticateWith:(NSString*)username
+            skPrivateKey:(NSData*)privateKey
+                  origin:(NSString*)origin
+       assertionProvider:(NSRemoteShellSKAssertionProvider)provider {
+    if (self.destroyed) return;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __weak typeof(self) magic = self;
+    @synchronized (self.requestInvokations) {
+        id block = [^{
+            [magic unsafeAuthenticateWith:username
+                             skPrivateKey:privateKey
+                                   origin:origin
+                        assertionProvider:provider];
+            DISPATCH_SEMAPHORE_CHECK_SIGNLE(sem);
+        } copy];
+        [self.requestInvokations addObject:block];
+    }
+    [self.associatedLoop explicitRequestHandle];
+    // Wait without the operation-timeout ceiling: a security-key assertion
+    // gates on the human (touch + PIN) and can outrun any fixed timeout.
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+}
+#endif // TARGET_OS_OSX — SK public wrapper
 
 #pragma exec
 
@@ -1042,6 +1172,65 @@ continue; \
         NSLog(@"authenticate success");
     }
 }
+
+#if TARGET_OS_OSX
+- (void)unsafeAuthenticateWith:(NSString*)username
+                  skPrivateKey:(NSData*)privateKey
+                        origin:(NSString*)origin
+             assertionProvider:(NSRemoteShellSKAssertionProvider)provider {
+    if (![self unsafeValidateSession]) {
+        [self unsafeDisconnect];
+        return;
+    }
+    if (self.authenticated) {
+        return;
+    }
+    if (!privateKey.length || !provider) {
+        return;
+    }
+    LIBSSH2_SESSION *session = self.associatedSession;
+
+    // The sign callback blocks on the human; drop libssh2's own timeout for the
+    // duration so it can't abort the exchange mid-assertion. The effective cap
+    // becomes sshd's LoginGraceTime.
+    libssh2_session_set_timeout(session, 0);
+
+    SigilttySKSignContext ctx = {0};
+    ctx.provider = provider;
+    const char *originC = origin ? [origin UTF8String] : "https://sigiltty.com";
+    ctx.origin = originC;
+    void *skAbstract = &ctx;
+
+    const char *user = username ? [username UTF8String] : NULL;
+    size_t userLen = username ? strlen(user) : 0;
+    const char *priv = (const char *)privateKey.bytes;
+    size_t privLen = privateKey.length;
+
+    BOOL authenticated = NO;
+    while (true) {
+        long long rc = libssh2_userauth_publickey_sk(session,
+                                                     user, userLen,
+                                                     NULL, 0,
+                                                     priv, privLen,
+                                                     "",
+                                                     sigiltty_sk_sign,
+                                                     &skAbstract);
+        if (rc == LIBSSH2_ERROR_EAGAIN) {
+            usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT);
+            continue;
+        }
+        authenticated = (rc == 0);
+        break;
+    }
+
+    libssh2_session_set_timeout(session, [self.operationTimeout doubleValue] * 1000);
+    [self unsafeReadLastError];
+    if (authenticated) {
+        self.authenticated = YES;
+        NSLog(@"security-key authenticate success");
+    }
+}
+#endif // TARGET_OS_OSX — SK unsafe authenticate
 
 #pragma exec
 

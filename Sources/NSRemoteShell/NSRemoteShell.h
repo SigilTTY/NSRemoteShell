@@ -12,6 +12,36 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+// The webauthn-sk auth API depends on the patched CSSH slice (only macOS ships
+// it today); on other platforms the type/method simply don't exist. Keep the
+// public surface in lockstep with the .m guards (docs/design/fido-keys.md).
+#if TARGET_OS_OSX
+
+/// The output of a platform WebAuthn getAssertion, handed back to the SSH
+/// layer so it can assemble the "webauthn-sk-ecdsa-sha2-nistp256@openssh.com"
+/// signature. Each field is the raw bytes straight off
+/// ASAuthorizationSecurityKeyPublicKeyCredentialAssertion.
+@interface NSRemoteShellSKAssertion : NSObject
+/// ECDSA signature, ASN.1 DER encoded (assertion.signature).
+@property (nonatomic, strong) NSData *signatureDER;
+/// Raw authenticator data (assertion.rawAuthenticatorData):
+/// rpIdHash(32) ‖ flags(1) ‖ counter(4) ‖ extensions(rest).
+@property (nonatomic, strong) NSData *authenticatorData;
+/// Raw clientDataJSON (assertion.rawClientDataJSON) — must embed the SSH
+/// challenge as its base64url-no-pad "challenge" field.
+@property (nonatomic, strong) NSData *clientDataJSON;
+@end
+
+/// Drives a platform WebAuthn getAssertion for an SK (FIDO2) key. Invoked
+/// synchronously on the SSH event-loop thread during authentication, with the
+/// raw bytes libssh2 wants signed. The implementation MUST block until the
+/// user completes the assertion (present the system security-key sheet on the
+/// main thread) and return the result, or nil to abort. The `challenge` bytes
+/// must be base64url-no-pad encoded into the WebAuthn request's challenge.
+typedef NSRemoteShellSKAssertion * _Nullable (^NSRemoteShellSKAssertionProvider)(NSData *challenge);
+
+#endif // TARGET_OS_OSX — security-key assertion types
+
 /// Why the last shell channel ended — lets the app distinguish a clean
 /// remote close (`exit`, server logout) from a broken link (network cut)
 /// and from its own decision to stop.
@@ -78,6 +108,20 @@ typedef NS_ENUM(NSInteger, NSRemoteShellSessionEnd) {
             andPublicKey:(nullable NSString *)publicKey
            andPrivateKey:(NSString *)privateKey
              andPassword:(nullable NSString *)password;
+
+#pragma mark security key (FIDO / webauthn-sk) authentication
+
+#if TARGET_OS_OSX
+/// Authenticate with a hardware security key (FIDO2 / webauthn-sk). `privateKey`
+/// is the openssh-key-v1 sk-ecdsa container (PEM text); `origin` is the WebAuthn
+/// origin string (e.g. https://sigiltty.com) emitted into the signature. Blocks
+/// until the assertion completes — call this OFF the main thread so the provider
+/// can drive the system sheet on main.
+- (void)authenticateWith:(NSString *)username
+            skPrivateKey:(NSData *)privateKey
+                  origin:(NSString *)origin
+       assertionProvider:(NSRemoteShellSKAssertionProvider)provider;
+#endif // TARGET_OS_OSX — security-key authentication
 
 #pragma mark helper
 
