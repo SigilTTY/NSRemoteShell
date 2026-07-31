@@ -12,10 +12,11 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-// The webauthn-sk auth API depends on the patched CSSH slice (only macOS ships
-// it today); on other platforms the type/method simply don't exist. Keep the
-// public surface in lockstep with the .m guards (docs/design/fido-keys.md).
-#if TARGET_OS_OSX
+// The webauthn-sk auth API depends on the patched CSSH slice — carried today
+// by the macOS and iOS (device + simulator) slices; Catalyst/tvOS/visionOS
+// remain stock, so the type/method don't exist there. Keep the public surface
+// in lockstep with the .m guards (docs/design/fido-keys.md).
+#if TARGET_OS_OSX || (TARGET_OS_IOS && !TARGET_OS_MACCATALYST)
 
 /// The output of a platform WebAuthn getAssertion, handed back to the SSH
 /// layer so it can assemble the "webauthn-sk-ecdsa-sha2-nistp256@openssh.com"
@@ -40,7 +41,7 @@ NS_ASSUME_NONNULL_BEGIN
 /// must be base64url-no-pad encoded into the WebAuthn request's challenge.
 typedef NSRemoteShellSKAssertion * _Nullable (^NSRemoteShellSKAssertionProvider)(NSData *challenge);
 
-#endif // TARGET_OS_OSX — security-key assertion types
+#endif // patched-CSSH platforms — security-key assertion types
 
 /// Why the last shell channel ended — lets the app distinguish a clean
 /// remote close (`exit`, server logout) from a broken link (network cut)
@@ -111,7 +112,7 @@ typedef NS_ENUM(NSInteger, NSRemoteShellSessionEnd) {
 
 #pragma mark security key (FIDO / webauthn-sk) authentication
 
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX || (TARGET_OS_IOS && !TARGET_OS_MACCATALYST)
 /// Authenticate with a hardware security key (FIDO2 / webauthn-sk). `privateKey`
 /// is the openssh-key-v1 sk-ecdsa container (PEM text); `origin` is the WebAuthn
 /// origin string (e.g. https://sigiltty.com) emitted into the signature. Blocks
@@ -121,7 +122,7 @@ typedef NS_ENUM(NSInteger, NSRemoteShellSessionEnd) {
             skPrivateKey:(NSData *)privateKey
                   origin:(NSString *)origin
        assertionProvider:(NSRemoteShellSKAssertionProvider)provider;
-#endif // TARGET_OS_OSX — security-key authentication
+#endif // patched-CSSH platforms — security-key authentication
 
 #pragma mark helper
 

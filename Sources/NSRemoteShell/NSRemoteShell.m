@@ -106,12 +106,13 @@ static ssize_t sigiltty_transport_recv(libssh2_socket_t sock,
 }
 
 // The webauthn-sk sign path touches LIBSSH2_SK_SIG_INFO fields that only exist
-// in the patched CSSH header, and only the macOS CSSH slice ships the matching
-// patched binary. On other platforms the stock header/binary lack those fields
-// (writing them would corrupt the smaller stack struct), so the whole SK sign
-// machinery is macOS-only until the prebuilt xcframework is re-emitted for all
-// slices (docs/design/fido-keys.md).
-#if TARGET_OS_OSX
+// in the patched CSSH header, and only the macOS and iOS (device + simulator)
+// slices ship the matching patched binary. On stock-slice platforms
+// (Catalyst/tvOS/visionOS) the header/binary lack those fields (writing them
+// would corrupt the smaller stack struct), so the SK sign machinery stays off
+// there until the prebuilt xcframework is re-emitted for all slices
+// (docs/design/fido-keys.md).
+#if TARGET_OS_OSX || (TARGET_OS_IOS && !TARGET_OS_MACCATALYST)
 
 // Context threaded through libssh2's SK abstract pointer down to the sign
 // callback. `libssh2_userauth_publickey_sk(session, …, &skAbstract)` stores our
@@ -208,7 +209,7 @@ static LIBSSH2_USERAUTH_SK_SIGN_FUNC(sigiltty_sk_sign) {
 @implementation NSRemoteShellSKAssertion
 @end
 
-#endif // TARGET_OS_OSX — SK sign machinery
+#endif // patched-CSSH platforms — SK sign machinery
 
 @implementation NSRemoteShell
 
@@ -447,7 +448,7 @@ continue; \
     MakeDispatchSemaphoreWaitWithTimeout(sem)
 }
 
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX || (TARGET_OS_IOS && !TARGET_OS_MACCATALYST)
 - (void)authenticateWith:(NSString*)username
             skPrivateKey:(NSData*)privateKey
                   origin:(NSString*)origin
@@ -470,7 +471,7 @@ continue; \
     // gates on the human (touch + PIN) and can outrun any fixed timeout.
     dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
 }
-#endif // TARGET_OS_OSX — SK public wrapper
+#endif // patched-CSSH platforms — SK public wrapper
 
 #pragma exec
 
@@ -1173,7 +1174,7 @@ continue; \
     }
 }
 
-#if TARGET_OS_OSX
+#if TARGET_OS_OSX || (TARGET_OS_IOS && !TARGET_OS_MACCATALYST)
 - (void)unsafeAuthenticateWith:(NSString*)username
                   skPrivateKey:(NSData*)privateKey
                         origin:(NSString*)origin
@@ -1230,7 +1231,7 @@ continue; \
         NSLog(@"security-key authenticate success");
     }
 }
-#endif // TARGET_OS_OSX — SK unsafe authenticate
+#endif // patched-CSSH platforms — SK unsafe authenticate
 
 #pragma exec
 
