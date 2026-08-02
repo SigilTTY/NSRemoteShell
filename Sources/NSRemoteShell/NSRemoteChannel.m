@@ -13,6 +13,7 @@
 @property (nonatomic, nullable, readwrite, assign) LIBSSH2_CHANNEL *representedChannel;
 
 @property (nonatomic, nullable, strong) NSRemoteChannelRequestDataBlock requestDataBlock;
+@property (nonatomic, nullable, strong) NSRemoteChannelRequestRawDataBlock requestRawDataBlock;
 @property (nonatomic, nullable, strong) NSRemoteChannelReceiveDataBlock receiveDataBlock;
 @property (nonatomic, nullable, strong) NSRemoteChannelContinuationBlock continuationDecisionBlock;
 @property (nonatomic, nullable, strong) NSRemoteChannelTerminalSizeBlock requestTerminalSizeBlock;
@@ -60,6 +61,10 @@
 
 - (void)setRequestDataChain:(NSRemoteChannelRequestDataBlock _Nonnull)requestData {
     self.requestDataBlock = requestData;
+}
+
+- (void)setRequestRawDataChain:(NSRemoteChannelRequestRawDataBlock _Nonnull)requestRawData {
+    self.requestRawDataBlock = requestRawData;
 }
 
 - (void)setReceivedDataChain:(NSRemoteChannelReceiveDataBlock _Nonnull)receiveData {
@@ -152,7 +157,57 @@
     }
 }
 
+// ZMODEM upload path (SigilTTY): length-delimited binary input, pulled on
+// demand ahead of the string chain — a UTF-8 round trip would mangle bytes
+// >= 0x80. Bounded per tick so a large transfer cannot starve channel
+// reads; partial libssh2 writes advance an offset instead of bailing
+// (binary frames must never be silently truncated).
+static const NSUInteger kRawWritePerTickBudget = 256 * 1024;
+
+- (void)unsafeChannelWriteRaw {
+    if (!self.requestRawDataBlock) {
+        return;
+    }
+    NSUInteger budgetLeft = kRawWritePerTickBudget;
+    NSDate *writeDeadline = [[NSDate alloc] initWithTimeIntervalSinceNow:LIBSSH2_SHUTDOWN_GRACE_SECONDS];
+    while (budgetLeft > 0) {
+        if ([self unsafeChannelShouldTerminate]) {
+            return;
+        }
+        NSData *data = self.requestRawDataBlock();
+        if (!data || [data length] < 1) {
+            return;
+        }
+        NSUInteger offset = 0;
+        while (offset < [data length]) {
+            if ([self unsafeChannelShouldTerminate]) {
+                return;
+            }
+            long rc = libssh2_channel_write(self.representedChannel,
+                                            (const char *)[data bytes] + offset,
+                                            [data length] - offset);
+            if (rc == LIBSSH2_ERROR_EAGAIN) {
+                if ([writeDeadline timeIntervalSinceNow] < 0) {
+                    NSLog(@"raw channel write stalled past grace period, dropping remaining input");
+                    return;
+                }
+                usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT);
+                continue;
+            }
+            if (rc < 0) {
+                NSLog(@"channel write failed (%ld), terminating channel", rc);
+                [self recordTerminationReason:NSRemoteShellSessionEndTransportError];
+                self.channelCompleted = YES;
+                return;
+            }
+            offset += (NSUInteger)rc;
+        }
+        budgetLeft = budgetLeft > [data length] ? budgetLeft - [data length] : 0;
+    }
+}
+
 - (void)unsafeChannelWrite {
+    [self unsafeChannelWriteRaw];
     if (!self.requestDataBlock) {
         return;
     }

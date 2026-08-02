@@ -15,6 +15,11 @@ NS_ASSUME_NONNULL_BEGIN
 @interface NSRemoteChannel : NSObject <NSRemoteOperableObject>
 
 typedef NSString* _Nonnull (^NSRemoteChannelRequestDataBlock)(void);
+// Raw bytes to WRITE to the channel — NOT a string. Binary protocols that
+// ride the terminal stream (ZMODEM file transfer) produce bytes >= 0x80
+// that a UTF-8 round trip would mangle. Pulled on demand each tick before
+// the string chain; return nil/empty when nothing is pending.
+typedef NSData* _Nullable (^NSRemoteChannelRequestRawDataBlock)(void);
 // Raw bytes as read from the channel — NOT a string. Terminal output is a byte
 // stream that is routinely invalid UTF-8 (vim's t_u7 ambiguous-width probe
 // emits a bare 0xbd, binaries get cat'ed, multi-byte characters straddle chunk
@@ -41,6 +46,7 @@ typedef CGSize (^NSRemoteChannelTerminalSizeBlock)(void);
 - (void)onTermination:(dispatch_block_t)terminationHandler;
 
 - (void)setRequestDataChain:(NSRemoteChannelRequestDataBlock _Nonnull)requestData;
+- (void)setRequestRawDataChain:(NSRemoteChannelRequestRawDataBlock _Nonnull)requestRawData;
 - (void)setReceivedDataChain:(NSRemoteChannelReceiveDataBlock _Nonnull)receiveData;
 - (void)setContinuationChain:(NSRemoteChannelContinuationBlock _Nonnull)continuation;
 - (void)setTerminalSizeChain:(NSRemoteChannelTerminalSizeBlock _Nonnull)terminalSize;

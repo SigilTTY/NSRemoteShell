@@ -149,6 +149,18 @@ typedef NS_ENUM(NSInteger, NSRemoteShellSessionEnd) {
               withOutputDataBuffer:(void (^)(NSData * _Nonnull))withOutputDataBuffer
            withContinuationHandler:(BOOL (^)(void))withContinuationBlock;
 
+// Same as above plus a raw INPUT channel: length-delimited binary bytes
+// pulled on demand ahead of the string buffer each tick. Binary protocols
+// riding the terminal stream (ZMODEM upload) need this — a UTF-8 round
+// trip mangles bytes >= 0x80. Return nil/empty when nothing is pending.
+- (void)beginShellWithTerminalType:(nullable NSString*)withTerminalType
+                      withOnCreate:(dispatch_block_t)withOnCreate
+                  withTerminalSize:(nullable CGSize (^)(void))withRequestTerminalSize
+               withWriteDataBuffer:(nullable NSString* (^)(void))withWriteDataBuffer
+            withRawWriteDataBuffer:(nullable NSData* _Nullable (^)(void))withRawWriteDataBuffer
+              withOutputDataBuffer:(void (^)(NSData * _Nonnull))withOutputDataBuffer
+           withContinuationHandler:(BOOL (^)(void))withContinuationBlock;
+
 #pragma mark agent forwarding
 
 // Enables SSH agent forwarding on the next interactive shell. `handler` is

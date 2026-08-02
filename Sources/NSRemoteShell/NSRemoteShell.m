@@ -508,6 +508,23 @@ continue; \
               withOutputDataBuffer:(void (^)(NSData * _Nonnull))withOutputDataBuffer
            withContinuationHandler:(BOOL (^)(void))withContinuationBlock;
 {
+    [self beginShellWithTerminalType:withTerminalType
+                        withOnCreate:withOnCreate
+                    withTerminalSize:withRequestTerminalSize
+                 withWriteDataBuffer:withWriteDataBuffer
+              withRawWriteDataBuffer:NULL
+                withOutputDataBuffer:withOutputDataBuffer
+             withContinuationHandler:withContinuationBlock];
+}
+
+- (void)beginShellWithTerminalType:(nullable NSString*)withTerminalType
+                      withOnCreate:(dispatch_block_t)withOnCreate
+                  withTerminalSize:(nullable CGSize (^)(void))withRequestTerminalSize
+               withWriteDataBuffer:(nullable NSString* (^)(void))withWriteDataBuffer
+            withRawWriteDataBuffer:(nullable NSData* _Nullable (^)(void))withRawWriteDataBuffer
+              withOutputDataBuffer:(void (^)(NSData * _Nonnull))withOutputDataBuffer
+           withContinuationHandler:(BOOL (^)(void))withContinuationBlock;
+{
     if (self.destroyed) return;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
     __weak typeof(self) magic = self;
@@ -516,6 +533,7 @@ continue; \
             [magic unsafeOpenShellWithTerminal:withTerminalType
                               withTerminalSize:withRequestTerminalSize
                                  withWriteData:withWriteDataBuffer
+                              withRawWriteData:withRawWriteDataBuffer
                                     withOutput:withOutputDataBuffer
                                   withOnCreate:withOnCreate
                        withContinuationHandler:withContinuationBlock
@@ -1327,6 +1345,7 @@ continue; \
 - (void)unsafeOpenShellWithTerminal:(nullable NSString*)terminalType
                    withTerminalSize:(nullable CGSize (^)(void))requestTerminalSize
                       withWriteData:(nullable NSString* (^)(void))requestWriteData
+                   withRawWriteData:(nullable NSData* _Nullable (^)(void))requestRawWriteData
                          withOutput:(void (^)(NSData * _Nonnull))responseDataBlock
                        withOnCreate:(dispatch_block_t)withOnCreate
             withContinuationHandler:(BOOL (^)(void))continuationBlock
@@ -1371,6 +1390,7 @@ continue; \
                                                                    withRepresentedChanel:channel];
     if (requestTerminalSize) { [channelObject setTerminalSizeChain:requestTerminalSize]; }
     if (requestWriteData) { [channelObject setRequestDataChain:requestWriteData]; }
+    if (requestRawWriteData) { [channelObject setRequestRawDataChain:requestRawWriteData]; }
     if (responseDataBlock) { [channelObject setReceivedDataChain:responseDataBlock]; }
     if (continuationBlock) { [channelObject setContinuationChain:continuationBlock]; }
 
