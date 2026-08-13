@@ -545,6 +545,39 @@ continue; \
     dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
 }
 
+- (int)beginExecuteWithCommand:(NSString*)withCommand
+              withTerminalType:(nullable NSString*)withTerminalType
+                  withOnCreate:(dispatch_block_t)withOnCreate
+              withTerminalSize:(nullable CGSize (^)(void))withRequestTerminalSize
+           withWriteDataBuffer:(nullable NSString* (^)(void))withWriteDataBuffer
+        withRawWriteDataBuffer:(nullable NSData* _Nullable (^)(void))withRawWriteDataBuffer
+          withOutputDataBuffer:(void (^)(NSData * _Nonnull))withOutputDataBuffer
+       withContinuationHandler:(BOOL (^)(void))withContinuationBlock
+{
+    if (self.destroyed) return 0;
+    __block int exitCode = 0;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    __weak typeof(self) magic = self;
+    @synchronized (self.requestInvokations) {
+        id block = [^{
+            [magic unsafeExecuteCommandWithTerminal:withCommand
+                                   withTerminalType:withTerminalType
+                                   withTerminalSize:withRequestTerminalSize
+                                      withWriteData:withWriteDataBuffer
+                                   withRawWriteData:withRawWriteDataBuffer
+                                         withOutput:withOutputDataBuffer
+                                       withOnCreate:withOnCreate
+                            withContinuationHandler:withContinuationBlock
+                                    withSetExitCode:&exitCode
+                            withCompletionSemaphore:sem];
+        } copy];
+        [self.requestInvokations addObject:block];
+    }
+    [self.associatedLoop explicitRequestHandle];
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    return exitCode;
+}
+
 #pragma port
 
 - (void)createPortForwardWithLocalPort:(NSNumber*)localPort
@@ -1487,6 +1520,161 @@ continue; \
                     // Shell-level teardown released the channel without its
                     // own cause and nothing pre-recorded one (keep-alive
                     // paths do) — a dead connection means the transport broke.
+                    strongSelf.lastShellSessionEnd = NSRemoteShellSessionEndTransportError;
+                }
+            }
+            DISPATCH_SEMAPHORE_CHECK_SIGNLE(completionSemaphore);
+        }];
+    }
+
+    [self.operableObjects addObject:channelObject];
+    if (withOnCreate) { withOnCreate(); }
+}
+
+// unsafeOpenShellWithTerminal with libssh2_channel_exec in place of
+// libssh2_channel_shell: same env/pty/size/input plumbing, but the remote
+// runs a single command and the channel dies with it. Termination publishes
+// to lastShellSessionEnd exactly like the shell path — when the connection's
+// interactive surface IS this command, the app's dead-session reasons must
+// keep working — and additionally hands back the command's exit status.
+- (void)unsafeExecuteCommandWithTerminal:(NSString*)command
+                        withTerminalType:(nullable NSString*)terminalType
+                        withTerminalSize:(nullable CGSize (^)(void))requestTerminalSize
+                           withWriteData:(nullable NSString* (^)(void))requestWriteData
+                        withRawWriteData:(nullable NSData* _Nullable (^)(void))requestRawWriteData
+                              withOutput:(void (^)(NSData * _Nonnull))responseDataBlock
+                            withOnCreate:(dispatch_block_t)withOnCreate
+                 withContinuationHandler:(BOOL (^)(void))continuationBlock
+                         withSetExitCode:(int*)exitCode
+                 withCompletionSemaphore:(dispatch_semaphore_t)completionSemaphore {
+    if (exitCode) { *exitCode = 0; }
+    if (![self unsafeValidateSession]) {
+        [self unsafeDisconnect];
+        DISPATCH_SEMAPHORE_CHECK_SIGNLE(completionSemaphore);
+        return;
+    }
+    if (!self.authenticated) {
+        DISPATCH_SEMAPHORE_CHECK_SIGNLE(completionSemaphore);
+        return;
+    }
+    LIBSSH2_SESSION *session = self.associatedSession;
+    LIBSSH2_CHANNEL *channel = NULL;
+    NSDate *date = [[NSDate alloc] initWithTimeIntervalSinceNow:[self.operationTimeout intValue]];
+    while (true) {
+        if ([date timeIntervalSinceNow] < 0) {
+            libssh2_session_set_last_error(self.associatedSession, LIBSSH2_ERROR_TIMEOUT, NULL);
+            break;
+        }
+        LIBSSH2_CHANNEL *channelBuilder = libssh2_channel_open_session(session);
+        if (channelBuilder) {
+            libssh2_session_set_last_error(session, 0, NULL);
+            channel = channelBuilder;
+            break;
+        }
+        long rc = libssh2_session_last_errno(session);
+        if (rc == LIBSSH2_ERROR_EAGAIN) {
+            usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT);
+            continue;
+        }
+        break;
+    }
+    [self unsafeReadLastError];
+    if (!channel) {
+        NSLog(@"failed to allocate channel");
+        DISPATCH_SEMAPHORE_CHECK_SIGNLE(completionSemaphore);
+        return;
+    }
+    NSRemoteChannel *channelObject = [[NSRemoteChannel alloc] initWithRepresentedSession:session
+                                                                   withRepresentedChanel:channel];
+    if (requestTerminalSize) { [channelObject setTerminalSizeChain:requestTerminalSize]; }
+    if (requestWriteData) { [channelObject setRequestDataChain:requestWriteData]; }
+    if (requestRawWriteData) { [channelObject setRequestRawDataChain:requestRawWriteData]; }
+    if (responseDataBlock) { [channelObject setReceivedDataChain:responseDataBlock]; }
+    if (continuationBlock) { [channelObject setContinuationChain:continuationBlock]; }
+
+    // Environment variables via SSH `env` requests, before the pty request —
+    // same best-effort semantics as the shell path (AcceptEnv gating).
+    NSDictionary<NSString*, NSString*> *shellEnvironment = self.shellEnvironment;
+    for (NSString *envKey in shellEnvironment) {
+        NSString *envValue = shellEnvironment[envKey];
+        const char *envKeyC = [envKey UTF8String];
+        const char *envValueC = [envValue UTF8String];
+        while (true) {
+            int rc = libssh2_channel_setenv_ex(channel,
+                                               (char *)envKeyC, (unsigned int)strlen(envKeyC),
+                                               (char *)envValueC, (unsigned int)strlen(envValueC));
+            if (rc == LIBSSH2_ERROR_EAGAIN) { usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT); continue; }
+            if (rc != 0) { NSLog(@"setenv %@ rejected: %d (non-fatal)", envKey, rc); }
+            break;
+        }
+    }
+
+    do {
+        NSString *requestPseudoTermial = @"xterm";
+        if (terminalType) { requestPseudoTermial = terminalType; }
+        BOOL requestedPty = NO;
+        while (true) {
+            long rc = libssh2_channel_request_pty(channel, [requestPseudoTermial UTF8String]);
+            if (rc == LIBSSH2_ERROR_EAGAIN) {
+                usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT);
+                continue;
+            }
+            requestedPty = (rc == 0);
+            break;
+        }
+        if (!requestedPty) {
+            NSLog(@"failed to request pty");
+            [channelObject unsafeDisconnectAndPrepareForRelease];
+            DISPATCH_SEMAPHORE_CHECK_SIGNLE(completionSemaphore);
+            return;
+        }
+    } while (0);
+
+    [channelObject unsafeChannelTerminalSizeUpdate];
+
+    // Agent forwarding rides an exec channel the same way it rides a shell
+    // channel (auth-agent-req while larval); only offered when a handler is
+    // installed, and a refusal is non-fatal — mirrors the shell path.
+    if (self.agentForwardHandler) {
+        libssh2_session_callback_set(session, LIBSSH2_CALLBACK_AUTHAGENT,
+                                     (void *)sigiltty_authagent_open);
+        while (true) {
+            int rc = libssh2_channel_request_auth_agent(channel);
+            if (rc == LIBSSH2_ERROR_EAGAIN) { usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT); continue; }
+            if (rc != 0) { NSLog(@"agent forwarding request failed: %d", rc); }
+            break;
+        }
+    }
+
+    do {
+        BOOL channelStartupCompleted = NO;
+        while (true) {
+            long rc = libssh2_channel_exec(channel, [command UTF8String]);
+            if (rc == LIBSSH2_ERROR_EAGAIN) { usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT); continue; }
+            channelStartupCompleted = (rc == 0);
+            break;
+        }
+        if (!channelStartupCompleted) {
+            [channelObject unsafeDisconnectAndPrepareForRelease];
+            DISPATCH_SEMAPHORE_CHECK_SIGNLE(completionSemaphore);
+            return;
+        }
+    } while (0);
+
+    if (completionSemaphore) {
+        // Unretained for the same reason as the shell path: termination runs
+        // on the channel object itself, and a strong capture would cycle.
+        __unsafe_unretained NSRemoteChannel *rawChannel = channelObject;
+        __weak typeof(self) weakSelf = self;
+        [channelObject onTermination:^{
+            if (exitCode) { *exitCode = rawChannel.exitStatus; }
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf) {
+                NSRemoteShellSessionEnd reason = rawChannel.terminationReason;
+                if (reason != NSRemoteShellSessionEndUnknown) {
+                    strongSelf.lastShellSessionEnd = reason;
+                } else if (strongSelf.lastShellSessionEnd == NSRemoteShellSessionEndUnknown
+                           && !strongSelf.isConnected) {
                     strongSelf.lastShellSessionEnd = NSRemoteShellSessionEndTransportError;
                 }
             }

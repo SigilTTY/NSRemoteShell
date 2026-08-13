@@ -161,6 +161,26 @@ typedef NS_ENUM(NSInteger, NSRemoteShellSessionEnd) {
               withOutputDataBuffer:(void (^)(NSData * _Nonnull))withOutputDataBuffer
            withContinuationHandler:(BOOL (^)(void))withContinuationBlock;
 
+// Runs a single remote command on a PTY-backed exec channel: the shell
+// variant's full terminal plumbing (env requests, pty + size chain, string
+// and raw input buffers, raw byte output) with `withCommand` in place of a
+// login shell. Interactive TUI processes launched directly (e.g. `herdr
+// terminal attach`) need the pty — the plain beginExecuteWithCommand:
+// channel has none, so they refuse to start. Blocks the calling thread
+// until the channel terminates and returns the command's exit status (0
+// when the channel never started — read lastShellSessionEnd to tell the
+// two apart). Ends publish to lastShellSessionEnd exactly like the shell
+// variant: an exec-with-pty channel IS the interactive session of its
+// connection.
+- (int)beginExecuteWithCommand:(NSString*)withCommand
+              withTerminalType:(nullable NSString*)withTerminalType
+                  withOnCreate:(dispatch_block_t)withOnCreate
+              withTerminalSize:(nullable CGSize (^)(void))withRequestTerminalSize
+           withWriteDataBuffer:(nullable NSString* (^)(void))withWriteDataBuffer
+        withRawWriteDataBuffer:(nullable NSData* _Nullable (^)(void))withRawWriteDataBuffer
+          withOutputDataBuffer:(void (^)(NSData * _Nonnull))withOutputDataBuffer
+       withContinuationHandler:(BOOL (^)(void))withContinuationBlock;
+
 #pragma mark agent forwarding
 
 // Enables SSH agent forwarding on the next interactive shell. `handler` is
