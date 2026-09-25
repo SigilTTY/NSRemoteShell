@@ -1530,9 +1530,15 @@ continue; \
     do {
         NSString *requestPseudoTermial = @"xterm";
         if (terminalType) { requestPseudoTermial = terminalType; }
+        const char *termC = [requestPseudoTermial UTF8String];
+        CGSize initialSize = [channelObject unsafeClaimInitialTerminalSize];
         BOOL requestedPty = NO;
         while (true) {
-            long rc = libssh2_channel_request_pty(channel, [requestPseudoTermial UTF8String]);
+            long rc = libssh2_channel_request_pty_ex(channel,
+                                                     termC, (unsigned int)strlen(termC),
+                                                     NULL, 0,
+                                                     (int)initialSize.width, (int)initialSize.height,
+                                                     0, 0);
             if (rc == LIBSSH2_ERROR_EAGAIN) {
                 usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT);
                 continue;
@@ -1547,8 +1553,12 @@ continue; \
             return;
         }
     } while (0);
-    
-    [channelObject unsafeChannelTerminalSizeUpdate];
+
+    // No window-change before the shell/exec request: the size already rode
+    // in the pty-req above. Some servers deadlock on an early one —
+    // gliderlabs/ssh (JumpServer's koko) hands it to a one-slot channel the
+    // pty-req already filled and only drains once the shell handler runs, so
+    // the shell request never gets its reply. Later resizes go out per tick.
 
     // Agent forwarding (opt-in): register the reverse-channel callback and
     // ask the server to allow agent requests on this shell. Must happen
@@ -1694,9 +1704,15 @@ continue; \
     do {
         NSString *requestPseudoTermial = @"xterm";
         if (terminalType) { requestPseudoTermial = terminalType; }
+        const char *termC = [requestPseudoTermial UTF8String];
+        CGSize initialSize = [channelObject unsafeClaimInitialTerminalSize];
         BOOL requestedPty = NO;
         while (true) {
-            long rc = libssh2_channel_request_pty(channel, [requestPseudoTermial UTF8String]);
+            long rc = libssh2_channel_request_pty_ex(channel,
+                                                     termC, (unsigned int)strlen(termC),
+                                                     NULL, 0,
+                                                     (int)initialSize.width, (int)initialSize.height,
+                                                     0, 0);
             if (rc == LIBSSH2_ERROR_EAGAIN) {
                 usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT);
                 continue;
@@ -1712,7 +1728,11 @@ continue; \
         }
     } while (0);
 
-    [channelObject unsafeChannelTerminalSizeUpdate];
+    // No window-change before the shell/exec request: the size already rode
+    // in the pty-req above. Some servers deadlock on an early one —
+    // gliderlabs/ssh (JumpServer's koko) hands it to a one-slot channel the
+    // pty-req already filled and only drains once the shell handler runs, so
+    // the shell request never gets its reply. Later resizes go out per tick.
 
     // Agent forwarding rides an exec channel the same way it rides a shell
     // channel (auth-agent-req while larval); only offered when a handler is

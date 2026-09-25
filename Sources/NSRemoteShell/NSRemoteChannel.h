@@ -54,6 +54,10 @@ typedef CGSize (^NSRemoteChannelTerminalSizeBlock)(void);
 - (void)setChannelTimeoutWith:(double)timeoutValueFromNowInSecond;
 - (void)setChannelTimeoutWithScheduled:(NSDate*)timeoutDate;
 
+// The size to put in the pty-req itself, recorded as already sent so the
+// first tick doesn't repeat it as a window-change. Falls back to 80x24 (the
+// libssh2_channel_request_pty default) with no size chain or an empty size.
+- (CGSize)unsafeClaimInitialTerminalSize;
 - (void)unsafeChannelTerminalSizeUpdate;
 
 - (void)unsafeCallNonblockingOperations;

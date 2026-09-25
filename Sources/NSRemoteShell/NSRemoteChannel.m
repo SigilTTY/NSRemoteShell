@@ -278,6 +278,16 @@ static const NSUInteger kRawWritePerTickBudget = 256 * 1024;
     return YES;
 }
 
+- (CGSize)unsafeClaimInitialTerminalSize {
+    CGSize targetSize = CGSizeMake(80, 24);
+    if (self.requestTerminalSizeBlock) {
+        CGSize requested = self.requestTerminalSizeBlock();
+        if (requested.width >= 1 && requested.height >= 1) { targetSize = requested; }
+    }
+    self.currentTerminalSize = targetSize;
+    return targetSize;
+}
+
 - (void)unsafeChannelTerminalSizeUpdate {
     // may called from outside
     if (![self seatbeltCheckPassed]) { return; }
