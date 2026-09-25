@@ -72,6 +72,13 @@
 
 @property (nonatomic, readwrite, assign) NSRemoteShellSessionEnd lastShellSessionEnd;
 
+// Methods the server offered on the first userauth "none" probe, cached for
+// the connection: every later probe would count against sshd's MaxAuthTries.
+@property (nonatomic, readwrite, nullable, strong) NSString *serverAuthMethods;
+// The password the keyboard-interactive callback answers with — set only
+// for the duration of one libssh2_userauth_keyboard_interactive call.
+@property (nonatomic, readwrite, nullable, strong) NSString *keyboardInteractivePassword;
+
 // Called from the libssh2 AUTHAGENT callback (event-loop thread) to take
 // ownership of a reverse auth-agent channel.
 - (void)unsafeAcceptAgentForwardChannel:(LIBSSH2_CHANNEL *)channel;
@@ -103,6 +110,33 @@ static ssize_t sigiltty_transport_recv(libssh2_socket_t sock,
         shell.lastServerDataTimestamp = CFAbsoluteTimeGetCurrent();
     }
     return (n < 0) ? -errno : n;
+}
+
+// libssh2 keyboard-interactive callback: `*abstract` is the NSRemoteShell
+// (session user data). Answers every echo-off prompt with the password —
+// the single "Password:" prompt PAM-backed sshd sends (FreeBSD's default
+// sshd offers only publickey,keyboard-interactive). Echoed prompts (a
+// username, an OTP label) get an empty answer rather than the password.
+// libssh2 frees each response.text with the session's free function, which
+// is libc free() since the session is built with default allocators.
+static void sigiltty_kbdint_response(const char *name, int name_len,
+                                     const char *instruction, int instruction_len,
+                                     int num_prompts,
+                                     const LIBSSH2_USERAUTH_KBDINT_PROMPT *prompts,
+                                     LIBSSH2_USERAUTH_KBDINT_RESPONSE *responses,
+                                     void **abstract) {
+    (void)name; (void)name_len; (void)instruction; (void)instruction_len;
+    NSString *password = nil;
+    if (abstract && *abstract) {
+        NSRemoteShell *shell = (__bridge NSRemoteShell *)(*abstract);
+        password = shell.keyboardInteractivePassword;
+    }
+    const char *pwd = password ? [password UTF8String] : "";
+    for (int i = 0; i < num_prompts; i++) {
+        const char *answer = prompts[i].echo ? "" : pwd;
+        responses[i].text = strdup(answer);
+        responses[i].length = responses[i].text ? (unsigned int)strlen(answer) : 0;
+    }
 }
 
 // The webauthn-sk sign path needs the patched CSSH slice (SigilTTY/
@@ -993,6 +1027,8 @@ continue; \
     self.remoteBanner = NULL;
     self.remoteFingerPrint = NULL;
     self.remoteFingerprintSHA256 = NULL;
+    self.serverAuthMethods = NULL;
+    self.keyboardInteractivePassword = NULL;
     
     self.keepAliveAttampt = 0;
     self.keepAliveLastSuccessAttampt = NULL;
@@ -1167,15 +1203,61 @@ continue; \
         return;
     }
     LIBSSH2_SESSION *session = self.associatedSession;
-    BOOL authenticated = NO;
-    while (true) {
-        long long rc = libssh2_userauth_password(session, [username UTF8String], [password UTF8String]);
-        if (rc == LIBSSH2_ERROR_EAGAIN) {
-            usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT);
-            continue;
+    const char *user = [username UTF8String];
+    unsigned int userLength = (unsigned int)strlen(user);
+
+    // Ask which methods the server takes (once per connection). A server
+    // that accepts "none" authenticates right here.
+    if (!self.serverAuthMethods) {
+        char *list = NULL;
+        while (true) {
+            list = libssh2_userauth_list(session, user, userLength);
+            if (!list && libssh2_session_last_errno(session) == LIBSSH2_ERROR_EAGAIN) {
+                usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT);
+                continue;
+            }
+            break;
         }
-        authenticated = (rc == 0);
-        break;
+        if (!list && libssh2_userauth_authenticated(session)) {
+            self.authenticated = YES;
+            NSLog(@"authenticate success");
+            return;
+        }
+        // A failed probe leaves the list unknown: fall through to "password",
+        // the historical behaviour.
+        self.serverAuthMethods = list ? [NSString stringWithUTF8String:list] : @"";
+    }
+    NSArray<NSString *> *methods = [self.serverAuthMethods componentsSeparatedByString:@","];
+    // "password" when offered (or unknown); otherwise keyboard-interactive,
+    // which is how PAM-backed servers (FreeBSD's default sshd:
+    // PasswordAuthentication no, KbdInteractiveAuthentication yes) take one.
+    BOOL useKeyboardInteractive = ![methods containsObject:@"password"]
+        && [methods containsObject:@"keyboard-interactive"];
+
+    BOOL authenticated = NO;
+    if (useKeyboardInteractive) {
+        self.keyboardInteractivePassword = password ?: @"";
+        while (true) {
+            long long rc = libssh2_userauth_keyboard_interactive_ex(session, user, userLength,
+                                                                    &sigiltty_kbdint_response);
+            if (rc == LIBSSH2_ERROR_EAGAIN) {
+                usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT);
+                continue;
+            }
+            authenticated = (rc == 0);
+            break;
+        }
+        self.keyboardInteractivePassword = nil;
+    } else {
+        while (true) {
+            long long rc = libssh2_userauth_password(session, user, [password UTF8String]);
+            if (rc == LIBSSH2_ERROR_EAGAIN) {
+                usleep(LIBSSH2_CONTINUE_EAGAIN_WAIT);
+                continue;
+            }
+            authenticated = (rc == 0);
+            break;
+        }
     }
     [self unsafeReadLastError];
     if (authenticated) {
