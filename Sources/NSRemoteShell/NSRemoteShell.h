@@ -79,6 +79,13 @@ typedef NS_ENUM(NSInteger, NSRemoteShellSessionEnd) {
 @property (nonatomic, readonly) BOOL keepAliveWantReply;
 @property (nonatomic, readonly) NSInteger lastUsedLocalPort;
 
+/// Why the newest local forward last failed to open its direct-tcpip
+/// channel — libssh2's message, e.g. "Channel open failure (administratively
+/// prohibited)"; nil until one has failed. Cleared by each
+/// createPortForwardWithLocalPort. A connection dialed through the forward
+/// only sees its socket close, so a jump-host caller reads this for the reason.
+@property (atomic, readonly, nullable, copy) NSString *lastForwardOpenFailure;
+
 /// Why the last interactive shell (beginShellWithTerminalType…) ended.
 /// Reset to Unknown on every connect attempt.
 @property (nonatomic, readonly) NSRemoteShellSessionEnd lastShellSessionEnd;

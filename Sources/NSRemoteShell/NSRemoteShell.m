@@ -34,6 +34,7 @@
 @property (nonatomic, readwrite, nullable, strong) NSString *remoteFingerPrint;
 @property (nonatomic, readwrite, nullable, strong) NSString *remoteFingerprintSHA256;
 @property (nonatomic, readwrite, nullable, strong) NSString *lastError;
+@property (atomic, readwrite, nullable, copy) NSString *lastForwardOpenFailure;
 @property (nonatomic, readwrite, nullable, strong) NSString *lastFileTransferError;
 
 @property (nonatomic, readwrite, getter=isConnected) BOOL connected;
@@ -1862,6 +1863,7 @@ continue; \
     
     // Store the actual port that was used
     _lastUsedLocalPort = actualPortUsed;
+    self.lastForwardOpenFailure = nil;
     
     LIBSSH2_SESSION *session = self.associatedSession;
     NSLocalForward *operator = [[NSLocalForward alloc] initWithRepresentedSession:session
@@ -1873,6 +1875,10 @@ continue; \
     ];
     
     [operator setContinuationChain:continuationBlock];
+    __weak typeof(self) weakSelf = self;
+    [operator onChannelOpenFailure:^(NSString *reason) {
+        weakSelf.lastForwardOpenFailure = reason;
+    }];
     
     if (completionSemaphore) {
         [operator onTermination:^{

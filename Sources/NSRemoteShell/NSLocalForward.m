@@ -19,6 +19,7 @@
 @property (nonatomic, nonnull, readwrite, strong) NSMutableArray *forwardSocketPair;
 @property (nonatomic, nullable, strong) dispatch_block_t terminationBlock;
 @property (nonatomic, nullable, strong) NSRemoteChannelContinuationBlock continuationDecisionBlock;
+@property (nonatomic, nullable, strong) NSLocalForwardOpenFailureBlock openFailureBlock;
 @property (nonatomic, readwrite) BOOL forwardCompleted;
 
 @end
@@ -52,6 +53,10 @@
 
 - (void)setContinuationChain:(NSRemoteChannelContinuationBlock _Nonnull)continuation {
     self.continuationDecisionBlock = continuation;
+}
+
+- (void)onChannelOpenFailure:(NSLocalForwardOpenFailureBlock)handler {
+    self.openFailureBlock = handler;
 }
 
 - (void)setForwardCompleted:(BOOL)channelCompleted {
@@ -123,7 +128,12 @@
             break;
         }
         if (!channel) {
-            NSLog(@"accepted connection failed to open channel");
+            char *msg = NULL;
+            int code = libssh2_session_last_error(self.representedSession, &msg, NULL, 0);
+            NSString *reason = (msg && msg[0]) ? [NSString stringWithUTF8String:msg] : nil;
+            if (!reason) { reason = [NSString stringWithFormat:@"channel open failed (libssh2 error %d)", code]; }
+            NSLog(@"accepted connection failed to open channel: %@", reason);
+            if (self.openFailureBlock) { self.openFailureBlock(reason); }
             close(forwardsock);
             [self unsafeDisconnectAndPrepareForRelease];
             return;
