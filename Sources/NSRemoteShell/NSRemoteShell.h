@@ -58,6 +58,50 @@ typedef NS_ENUM(NSInteger, NSRemoteShellSessionEnd) {
     NSRemoteShellSessionEndContinuationEnded,
 };
 
+/// One step of dialing the TCP connection under the SSH session, so the app
+/// can show where a connect is (resolving, which address) and why it failed
+/// (refused, timed out, no route) instead of a single late "rejected".
+typedef NS_ENUM(NSInteger, NSRemoteShellConnectStep) {
+    /// Looking the host name up (never sent for an IP literal). `host`.
+    NSRemoteShellConnectStepResolving = 0,
+    /// The lookup answered. `host`, `addresses` in the order they are tried.
+    NSRemoteShellConnectStepResolved,
+    /// The lookup failed. `host`, `detail` = gai_strerror, `errorCode` = the
+    /// getaddrinfo code (EAI_*).
+    NSRemoteShellConnectStepResolveFailed,
+    /// Dialing one address. `address`, `port`, `timeout` = this address's
+    /// share of the connect budget in seconds.
+    NSRemoteShellConnectStepDialing,
+    /// That address failed. `address`, `port`, `errorCode` = errno
+    /// (ETIMEDOUT when its share of the budget ran out), `detail` = strerror.
+    NSRemoteShellConnectStepDialFailed,
+    /// The TCP connection is up; the SSH handshake starts next. `address`, `port`.
+    NSRemoteShellConnectStepConnected,
+};
+
+@interface NSRemoteShellConnectEvent : NSObject
+@property (nonatomic, readonly) NSRemoteShellConnectStep step;
+@property (nonatomic, readonly, copy) NSString *host;
+@property (nonatomic, readonly) NSInteger port;
+@property (nonatomic, readonly, nullable, copy) NSString *address;
+@property (nonatomic, readonly, copy) NSArray<NSString *> *addresses;
+@property (nonatomic, readonly) int errorCode;
+@property (nonatomic, readonly, nullable, copy) NSString *detail;
+@property (nonatomic, readonly) double timeout;
+- (instancetype)initWithStep:(NSRemoteShellConnectStep)step
+                        host:(NSString *)host
+                        port:(NSInteger)port
+                     address:(nullable NSString *)address
+                   addresses:(nullable NSArray<NSString *> *)addresses
+                   errorCode:(int)errorCode
+                      detail:(nullable NSString *)detail
+                     timeout:(double)timeout;
+@end
+
+/// Called synchronously on the shell's event-loop thread, during
+/// requestConnectAndWait; hop to your own queue before touching UI.
+typedef void (^NSRemoteShellConnectEventHandler)(NSRemoteShellConnectEvent *event);
+
 @interface NSRemoteShell : NSObject
 
 @property (nonatomic, readonly, getter=isConnected) BOOL connected;
@@ -98,6 +142,13 @@ typedef NS_ENUM(NSInteger, NSRemoteShellSessionEnd) {
 - (instancetype)setupConnectionTimeout:(NSNumber *)timeout;
 - (instancetype)setupKeepAliveInterval:(NSNumber *)interval;
 - (instancetype)setupKeepAliveWantReply:(BOOL)wantReply;
+/// Budget in seconds for opening the TCP connection, shared across every
+/// address the host resolves to (each gets an even share of what is left).
+/// 0 (the default) uses the connection timeout. Without one, a host that
+/// drops packets waited out the system SYN timeout (75 s) per address.
+- (instancetype)setupTCPConnectTimeout:(NSNumber *)timeout;
+/// Step-by-step progress of the TCP dial (see NSRemoteShellConnectStep).
+- (instancetype)setupConnectEventHandler:(nullable NSRemoteShellConnectEventHandler)handler;
 
 #pragma mark event loop
 

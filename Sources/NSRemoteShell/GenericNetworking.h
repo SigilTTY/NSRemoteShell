@@ -8,6 +8,7 @@
 #import <Foundation/Foundation.h>
 
 #import "GenericHeaders.h"
+#import "NSRemoteShell.h"
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -24,6 +25,17 @@ NS_ASSUME_NONNULL_BEGIN
                    withTargetPort:(NSNumber*)targetPort
              requireNonblockingIO:(BOOL)useNonblocking
 ;
+
+/// Resolves and dials `targetHost`, trying each address in turn within
+/// `timeout` seconds overall (<= 0: no limit, each connect waits out the
+/// system SYN timeout). Reports every step to `events` and, on failure,
+/// a one-line English reason through `failure`. Returns the socket, or 0.
++ (int)connectSocketToHost:(NSString*)targetHost
+                      port:(NSNumber*)targetPort
+                   timeout:(double)timeout
+      requireNonblockingIO:(BOOL)useNonblocking
+                    events:(nullable NSRemoteShellConnectEventHandler)events
+                   failure:(NSString * _Nullable * _Nullable)failure;
 
 + (void)destroyNativeSocket:(int)socketDescriptor;
 

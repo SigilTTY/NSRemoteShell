@@ -28,6 +28,8 @@
 @property (nonatomic, readwrite, nonnull, strong) NSString *remoteHost;
 @property (nonatomic, readwrite, nonnull, strong) NSNumber *remotePort;
 @property (nonatomic, readwrite, nonnull, strong) NSNumber *operationTimeout;
+@property (nonatomic, readwrite, nonnull, strong) NSNumber *tcpConnectTimeout;
+@property (atomic, readwrite, nullable, copy) NSRemoteShellConnectEventHandler connectEventHandler;
 
 @property (nonatomic, readwrite, nullable, strong) NSString *resolvedRemoteIpAddress;
 @property (nonatomic, readwrite, nullable, strong) NSString *remoteBanner;
@@ -245,6 +247,32 @@ static LIBSSH2_USERAUTH_SK_SIGN_FUNC(sigiltty_sk_sign) {
 
 #endif // patched-CSSH platforms — SK sign machinery
 
+@implementation NSRemoteShellConnectEvent
+
+- (instancetype)initWithStep:(NSRemoteShellConnectStep)step
+                        host:(NSString *)host
+                        port:(NSInteger)port
+                     address:(NSString *)address
+                   addresses:(NSArray<NSString *> *)addresses
+                   errorCode:(int)errorCode
+                      detail:(NSString *)detail
+                     timeout:(double)timeout {
+    self = [super init];
+    if (self) {
+        _step = step;
+        _host = [host copy];
+        _port = port;
+        _address = [address copy];
+        _addresses = [addresses copy] ?: @[];
+        _errorCode = errorCode;
+        _detail = [detail copy];
+        _timeout = timeout;
+    }
+    return self;
+}
+
+@end
+
 @implementation NSRemoteShell
 
 #pragma mark init
@@ -258,6 +286,7 @@ static LIBSSH2_USERAUTH_SK_SIGN_FUNC(sigiltty_sk_sign) {
         _remoteHost = @"";
         _remotePort = @(22);
         _operationTimeout = @(8);
+        _tcpConnectTimeout = @(0);
         _connected = NO;
         _authenticated = NO;
         _resolvedRemoteIpAddress = NULL;
@@ -337,6 +366,18 @@ static LIBSSH2_USERAUTH_SK_SIGN_FUNC(sigiltty_sk_sign) {
     @synchronized(self) {
         [self setOperationTimeout:timeout];
     }
+    return self;
+}
+
+- (instancetype)setupTCPConnectTimeout:(NSNumber *)timeout {
+    @synchronized(self) {
+        [self setTcpConnectTimeout:timeout ?: @(0)];
+    }
+    return self;
+}
+
+- (instancetype)setupConnectEventHandler:(NSRemoteShellConnectEventHandler)handler {
+    self.connectEventHandler = handler;
     return self;
 }
 
@@ -931,11 +972,22 @@ continue; \
 - (void)unsafeConnect {
     [self unsafeDisconnect];
     
-    int sock = [GenericNetworking createSocketWithTargetHost:self.remoteHost
-                                              withTargetPort:self.remotePort
-                                        requireNonblockingIO:NO];
+    double tcpTimeout = [self.tcpConnectTimeout doubleValue];
+    if (tcpTimeout <= 0) { tcpTimeout = [self.operationTimeout doubleValue]; }
+    NSString *dialFailure = nil;
+    int sock = [GenericNetworking connectSocketToHost:self.remoteHost
+                                                 port:self.remotePort
+                                              timeout:tcpTimeout
+                                 requireNonblockingIO:NO
+                                               events:self.connectEventHandler
+                                              failure:&dialFailure];
     if (!sock) {
-        NSLog(@"failed to create socket to host");
+        NSLog(@"failed to create socket to host: %@", dialFailure);
+        // No libssh2 session exists yet, so this is the only place the
+        // reason can come from; without it the UI said "Connection rejected".
+        @synchronized (self.lastError) {
+            self.lastError = dialFailure;
+        }
         return;
     }
     self.associatedSocket = sock;
@@ -990,8 +1042,20 @@ continue; \
         // Capture the libssh2 error before the session is freed, so the UI
         // can show the real handshake failure instead of a bare
         // "Connection rejected".
+        long handshakeErrno = libssh2_session_last_errno(constructorSession);
         [self unsafeReadLastError];
-        NSLog(@"session handshake failed with %@: %@", self.remoteHost, self.lastError ?: @"(no error detail)");
+        // libssh2's timeout carries no text, and an empty error reached the
+        // app as none at all — an open port that never speaks SSH (wrong
+        // service, a firewall that accepts then stalls) said "rejected".
+        if (self.lastError.length == 0) {
+            NSString *fallback = handshakeErrno == LIBSSH2_ERROR_TIMEOUT
+                ? @"The port is open but no SSH handshake arrived (timed out)"
+                : [NSString stringWithFormat:@"SSH handshake failed (libssh2 error %ld)", handshakeErrno];
+            @synchronized (self.lastError) {
+                self.lastError = fallback;
+            }
+        }
+        NSLog(@"session handshake failed with %@: %@", self.remoteHost, self.lastError);
         [self unsafeDisconnect];
         return;
     }
