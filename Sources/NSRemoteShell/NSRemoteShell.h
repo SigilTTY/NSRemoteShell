@@ -188,6 +188,21 @@ typedef NS_ENUM(NSInteger, NSRemoteShellSessionEnd) {
           withOutputDataBuffer:(void (^)(NSData * _Nonnull))withOutputDataBuffer
        withContinuationHandler:(BOOL (^)(void))withContinuationBlock;
 
+// The same PTY-backed exec channel, as a side channel next to the
+// connection's interactive session (SigilTTY's Assistant shell): its end is
+// returned to the caller only — lastShellSessionEnd, which reports why the
+// interactive session ended, is never written — and agent forwarding is not
+// requested on it. onCreate fires only once the command has started; a
+// channel that never started returns 0 without calling it.
+- (int)beginAuxiliaryExecuteWithCommand:(NSString*)withCommand
+                       withTerminalType:(nullable NSString*)withTerminalType
+                           withOnCreate:(dispatch_block_t)withOnCreate
+                       withTerminalSize:(nullable CGSize (^)(void))withRequestTerminalSize
+                    withWriteDataBuffer:(nullable NSString* (^)(void))withWriteDataBuffer
+                 withRawWriteDataBuffer:(nullable NSData* _Nullable (^)(void))withRawWriteDataBuffer
+                   withOutputDataBuffer:(void (^)(NSData * _Nonnull))withOutputDataBuffer
+                withContinuationHandler:(BOOL (^)(void))withContinuationBlock;
+
 #pragma mark agent forwarding
 
 // Enables SSH agent forwarding on the next interactive shell. `handler` is

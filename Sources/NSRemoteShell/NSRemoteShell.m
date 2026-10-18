@@ -589,6 +589,47 @@ continue; \
           withOutputDataBuffer:(void (^)(NSData * _Nonnull))withOutputDataBuffer
        withContinuationHandler:(BOOL (^)(void))withContinuationBlock
 {
+    return [self beginTerminalExecuteWithCommand:withCommand
+                                withTerminalType:withTerminalType
+                                    withOnCreate:withOnCreate
+                                withTerminalSize:withRequestTerminalSize
+                             withWriteDataBuffer:withWriteDataBuffer
+                          withRawWriteDataBuffer:withRawWriteDataBuffer
+                            withOutputDataBuffer:withOutputDataBuffer
+                         withContinuationHandler:withContinuationBlock
+                                       auxiliary:NO];
+}
+
+- (int)beginAuxiliaryExecuteWithCommand:(NSString*)withCommand
+                       withTerminalType:(nullable NSString*)withTerminalType
+                           withOnCreate:(dispatch_block_t)withOnCreate
+                       withTerminalSize:(nullable CGSize (^)(void))withRequestTerminalSize
+                    withWriteDataBuffer:(nullable NSString* (^)(void))withWriteDataBuffer
+                 withRawWriteDataBuffer:(nullable NSData* _Nullable (^)(void))withRawWriteDataBuffer
+                   withOutputDataBuffer:(void (^)(NSData * _Nonnull))withOutputDataBuffer
+                withContinuationHandler:(BOOL (^)(void))withContinuationBlock
+{
+    return [self beginTerminalExecuteWithCommand:withCommand
+                                withTerminalType:withTerminalType
+                                    withOnCreate:withOnCreate
+                                withTerminalSize:withRequestTerminalSize
+                             withWriteDataBuffer:withWriteDataBuffer
+                          withRawWriteDataBuffer:withRawWriteDataBuffer
+                            withOutputDataBuffer:withOutputDataBuffer
+                         withContinuationHandler:withContinuationBlock
+                                       auxiliary:YES];
+}
+
+- (int)beginTerminalExecuteWithCommand:(NSString*)withCommand
+                      withTerminalType:(nullable NSString*)withTerminalType
+                          withOnCreate:(dispatch_block_t)withOnCreate
+                      withTerminalSize:(nullable CGSize (^)(void))withRequestTerminalSize
+                   withWriteDataBuffer:(nullable NSString* (^)(void))withWriteDataBuffer
+                withRawWriteDataBuffer:(nullable NSData* _Nullable (^)(void))withRawWriteDataBuffer
+                  withOutputDataBuffer:(void (^)(NSData * _Nonnull))withOutputDataBuffer
+               withContinuationHandler:(BOOL (^)(void))withContinuationBlock
+                             auxiliary:(BOOL)auxiliary
+{
     if (self.destroyed) return 0;
     __block int exitCode = 0;
     dispatch_semaphore_t sem = dispatch_semaphore_create(0);
@@ -603,6 +644,7 @@ continue; \
                                          withOutput:withOutputDataBuffer
                                        withOnCreate:withOnCreate
                             withContinuationHandler:withContinuationBlock
+                                          auxiliary:auxiliary
                                     withSetExitCode:&exitCode
                             withCompletionSemaphore:sem];
         } copy];
@@ -1638,6 +1680,7 @@ continue; \
                               withOutput:(void (^)(NSData * _Nonnull))responseDataBlock
                             withOnCreate:(dispatch_block_t)withOnCreate
                  withContinuationHandler:(BOOL (^)(void))continuationBlock
+                               auxiliary:(BOOL)auxiliary
                          withSetExitCode:(int*)exitCode
                  withCompletionSemaphore:(dispatch_semaphore_t)completionSemaphore {
     if (exitCode) { *exitCode = 0; }
@@ -1738,7 +1781,7 @@ continue; \
     // Agent forwarding rides an exec channel the same way it rides a shell
     // channel (auth-agent-req while larval); only offered when a handler is
     // installed, and a refusal is non-fatal — mirrors the shell path.
-    if (self.agentForwardHandler) {
+    if (self.agentForwardHandler && !auxiliary) {
         libssh2_session_callback_set(session, LIBSSH2_CALLBACK_AUTHAGENT,
                                      (void *)sigiltty_authagent_open);
         while (true) {
@@ -1772,7 +1815,9 @@ continue; \
         [channelObject onTermination:^{
             if (exitCode) { *exitCode = rawChannel.exitStatus; }
             __strong typeof(weakSelf) strongSelf = weakSelf;
-            if (strongSelf) {
+            // A side channel's end is its caller's business; the connection's
+            // session-end reason belongs to its interactive session.
+            if (strongSelf && !auxiliary) {
                 NSRemoteShellSessionEnd reason = rawChannel.terminationReason;
                 if (reason != NSRemoteShellSessionEndUnknown) {
                     strongSelf.lastShellSessionEnd = reason;
